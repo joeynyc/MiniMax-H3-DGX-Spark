@@ -11,6 +11,10 @@ fi
 
 PORT="${H3_API_PORT:-8000}"
 BASE_URL="${H3_API_BASE:-http://127.0.0.1:$PORT}"
+AUTH_ARGS=()
+if [[ -n "${H3_API_KEY:-}" ]]; then
+  AUTH_ARGS=(-H "Authorization: Bearer ${H3_API_KEY}")
+fi
 
 printf '%s\n' '== container =='
 docker ps -a --filter name=minimax-h3-fl2va \
@@ -20,8 +24,8 @@ printf '\n%s\n' '== memory =='
 free -h
 
 printf '\n%s\n' '== health =='
-curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' "$BASE_URL/health" || true
+curl -fsS "${AUTH_ARGS[@]}" -o /dev/null -w 'HTTP %{http_code}\n' "$BASE_URL/health" || true
 
 printf '\n%s\n' '== models =='
-curl -fsS "$BASE_URL/v1/models" || true
+curl -fsS "${AUTH_ARGS[@]}" "$BASE_URL/v1/models" || true
 printf '\n'

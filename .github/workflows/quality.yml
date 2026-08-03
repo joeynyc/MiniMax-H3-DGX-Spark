@@ -13,15 +13,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
 
       - name: Audit public contents
         run: ./scripts/public-audit.sh
 
       - name: Check shell syntax
-        run: bash -n start-fp8.sh scripts/*.sh
+        run: bash -n start-fp8.sh scripts/*.sh tests/*.sh
 
       - name: Run ShellCheck
-        run: shellcheck start-fp8.sh scripts/*.sh
+        run: shellcheck start-fp8.sh scripts/*.sh tests/*.sh
+
+      - name: Test fail-closed network policy
+        run: ./tests/test-network-security.sh
 
       - name: Validate JSON
         run: python -m json.tool fp8-quant.json >/dev/null

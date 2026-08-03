@@ -19,12 +19,16 @@ BASE_URL="${H3_API_BASE:-http://127.0.0.1:$PORT}"
 OUT="${OUT:-$ROOT/output/smoke-t2va.mp4}"
 LOG="${LOG:-$ROOT/output/smoke-t2va.log}"
 PART="${OUT}.part"
+AUTH_ARGS=()
+if [[ -n "${H3_API_KEY:-}" ]]; then
+  AUTH_ARGS=(-H "Authorization: Bearer ${H3_API_KEY}")
+fi
 
 mkdir -p "$(dirname "$OUT")" "$(dirname "$LOG")"
 rm -f "$PART"
 
 START_NS="$(date +%s%N)"
-HTTP_CODE="$(curl -sS -X POST "$BASE_URL/v1/videos/sync" \
+HTTP_CODE="$(curl -sS "${AUTH_ARGS[@]}" -X POST "$BASE_URL/v1/videos/sync" \
   -F "prompt=Macro soldering a PCB under warm bench light, soft room tone." \
   -F "width=768" \
   -F "height=448" \

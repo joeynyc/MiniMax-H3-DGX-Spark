@@ -21,7 +21,10 @@ services:
       FLASHINFER_DISABLE_VERSION_CHECK: "1"
       HF_HOME: /root/.cache/huggingface
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      H3_BIND_HOST: ${H3_BIND_HOST:-127.0.0.1}
       H3_API_PORT: ${H3_API_PORT:-8000}
+      H3_ALLOW_REMOTE_API: ${H3_ALLOW_REMOTE_API:-false}
+      VLLM_API_KEY: ${H3_API_KEY:-}
     volumes:
       - ${MINIMAX_H3_MODEL_DIR:?Set MINIMAX_H3_MODEL_DIR in .env}:/models/MiniMax-H3/FL2VA:ro
       - ${HF_CACHE_DIR:?Set HF_CACHE_DIR in .env}:/root/.cache/huggingface

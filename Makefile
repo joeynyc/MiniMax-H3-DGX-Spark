@@ -1,4 +1,4 @@
-.PHONY: audit build down logs preflight smoke status test up verify
+.PHONY: audit build down logs preflight security-test smoke status test up verify
 
 preflight:
 	./scripts/preflight.sh
@@ -23,6 +23,9 @@ verify:
 
 test:
 	./scripts/test-patch.sh
+
+security-test:
+	./tests/test-network-security.sh
 
 audit:
 	./scripts/public-audit.sh

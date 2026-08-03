@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/security-common.sh"
 
 fail() {
   printf 'preflight: %s\n' "$*" >&2
@@ -40,6 +42,17 @@ CACHE_DIR="${HF_CACHE_DIR:-}"
 [[ -n "$CACHE_DIR" && "$CACHE_DIR" = /* ]] || fail "HF_CACHE_DIR must be an absolute path"
 [[ -d "$CACHE_DIR" ]] || fail "HF_CACHE_DIR does not exist: $CACHE_DIR"
 
+BIND_HOST="${H3_BIND_HOST:-127.0.0.1}"
+h3_validate_network_security \
+  "$BIND_HOST" "${H3_ALLOW_REMOTE_API:-false}" "${H3_API_KEY:-}" ||
+  fail "network policy rejected the configuration"
+
+if [[ -n "${H3_API_KEY:-}" ]]; then
+  ENV_MODE="$(stat -c '%a' "$ENV_FILE")"
+  (( (8#$ENV_MODE & 077) == 0 )) ||
+    fail ".env contains H3_API_KEY and must not be readable by group or others; run chmod 600 .env"
+fi
+
 PORT="${H3_API_PORT:-8000}"
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   fail "invalid H3_API_PORT: $PORT"
@@ -60,4 +73,10 @@ printf 'preflight passed\n'
 printf '  architecture: %s\n' "$ARCH"
 printf '  GPU: %s\n' "$GPU_NAME"
 printf '  model: %s\n' "$MODEL_DIR"
+printf '  API bind: %s\n' "$BIND_HOST"
 printf '  API port: %s\n' "$PORT"
+if [[ -n "${H3_API_KEY:-}" ]]; then
+  printf '  API authentication: enabled\n'
+else
+  printf '  API authentication: disabled (loopback only)\n'
+fi

@@ -81,6 +81,7 @@ git clone https://github.com/joeynyc/MiniMax-H3-DGX-Spark.git
 cd MiniMax-H3-DGX-Spark
 cp .env.example .env
 # Edit .env: checkpoint path, HF cache path, and license acknowledgment.
+# The secure default listens only on 127.0.0.1.
 
 make preflight
 make build
@@ -107,6 +108,12 @@ served at `POST /v1/videos/sync`. The smoke script stages the response, checks
 the HTTP status, rejects JSON/error bodies, and only promotes a file after
 `ffprobe` confirms a media container.
 
+Remote access is deliberately opt-in. Read [SECURITY.md](SECURITY.md) before
+changing `H3_BIND_HOST`; a non-loopback bind requires both
+`H3_ALLOW_REMOTE_API=true` and a strong `H3_API_KEY`. The client scripts send
+the configured bearer token automatically. Do not expose this service directly
+to the public internet.
+
 ## Repository map
 
 | Path | Purpose |
@@ -114,7 +121,8 @@ the HTTP status, rejects JSON/error bodies, and only promotes a file after
 | `Dockerfile` | Builds on the exact verified base-image digest |
 | `compose.yaml` | Portable single-GPU service without host-specific paths |
 | `patches/` | Apache-2.0 H3 compatibility module with modification notice |
-| `scripts/preflight.sh` | Architecture, memory, model, port, and license checks |
+| `scripts/preflight.sh` | Architecture, memory, model, port, license, and network-safety checks |
+| `scripts/security-common.sh` | Shared fail-closed loopback/remote-access policy |
 | `scripts/smoke-t2va.sh` | Fail-closed T2VA acceptance request |
 | `scripts/verify-output.sh` | Streams, full decode, audio, and checksum validation |
 | `tests/` | Focused loader/FP8/AdaLN regression coverage |
@@ -129,6 +137,8 @@ the HTTP status, rejects JSON/error bodies, and only promotes a file after
   aligned. The recorded path passed, but that warning is not suppressed.
 - No model weights, Hugging Face credentials, private endpoints, or generated
   outputs belong in this repository.
+- The launcher uses `--trust-remote-code`; use only a checkpoint from the
+  authoritative model source and read the runtime boundary in `SECURITY.md`.
 - Re-run the full acceptance flow before changing the base-image digest,
   attention backend, or patch.
 
