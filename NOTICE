@@ -1,0 +1,15 @@
+MiniMax-H3-DGX-Spark
+Copyright 2026 Joey Rodriguez
+
+This repository includes a modified copy of the MiniMax H3 transformer module
+from vLLM-Omni, which is licensed under the Apache License, Version 2.0:
+https://github.com/vllm-project/vllm-omni
+
+The transformer module states that its architecture and numerical contract are
+adapted from the Apache-2.0 SGLang diffusion reference supplied with the
+checkpoint:
+https://github.com/sgl-project/sglang
+
+MiniMax H3 model weights and model outputs are not included in this repository.
+They are governed by the separate MiniMax H3 Community License Agreement:
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE

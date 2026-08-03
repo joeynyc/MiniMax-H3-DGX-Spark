@@ -1,0 +1,12 @@
+{
+  "method": "fp8",
+  "activation_scheme": "dynamic",
+  "ignored_layers": [
+    "video_patch_proj",
+    "audio_patch_proj",
+    "time_embedder.proj_in",
+    "time_embedder.proj_out",
+    "final_layer.video_out",
+    "final_layer.audio_out"
+  ]
+}

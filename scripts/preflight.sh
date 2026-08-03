@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$ROOT/.env"
+
+fail() {
+  printf 'preflight: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -f "$ENV_FILE" ]] || fail "copy .env.example to .env and review it first"
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+[[ "${MINIMAX_H3_LICENSE_ACKNOWLEDGED:-false}" == "true" ]] ||
+  fail "read MODEL-LICENSE.md and set MINIMAX_H3_LICENSE_ACKNOWLEDGED=true only if authorized"
+
+command -v docker >/dev/null || fail "Docker is required"
+docker compose version >/dev/null || fail "Docker Compose v2 is required"
+command -v nvidia-smi >/dev/null || fail "nvidia-smi is required"
+
+ARCH="$(uname -m)"
+if [[ "$ARCH" != "aarch64" && "${ALLOW_UNSUPPORTED_ARCH:-false}" != "true" ]]; then
+  fail "verified architecture is aarch64; got $ARCH (set ALLOW_UNSUPPORTED_ARCH=true only for deliberate testing)"
+fi
+
+GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
+[[ -n "$GPU_NAME" ]] || fail "no NVIDIA GPU was detected"
+
+MODEL_DIR="${MINIMAX_H3_MODEL_DIR:-}"
+[[ -n "$MODEL_DIR" ]] || fail "MINIMAX_H3_MODEL_DIR is unset"
+[[ "$MODEL_DIR" = /* ]] || fail "MINIMAX_H3_MODEL_DIR must be an absolute path"
+[[ -f "$MODEL_DIR/model_index.json" ]] || fail "model_index.json is missing from $MODEL_DIR"
+[[ -d "$MODEL_DIR/transformer" ]] || fail "transformer directory is missing from $MODEL_DIR"
+
+CACHE_DIR="${HF_CACHE_DIR:-}"
+[[ -n "$CACHE_DIR" && "$CACHE_DIR" = /* ]] || fail "HF_CACHE_DIR must be an absolute path"
+[[ -d "$CACHE_DIR" ]] || fail "HF_CACHE_DIR does not exist: $CACHE_DIR"
+
+PORT="${H3_API_PORT:-8000}"
+[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || fail "invalid H3_API_PORT: $PORT"
+
+RUNNING="$(docker inspect minimax-h3-fl2va --format '{{.State.Running}}' 2>/dev/null || true)"
+if [[ "$RUNNING" != "true" ]]; then
+  AVAILABLE_KIB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
+  REQUIRED_KIB=$((105 * 1024 * 1024))
+  (( AVAILABLE_KIB >= REQUIRED_KIB )) ||
+    fail "at least 105 GiB available memory is required before cold start"
+  if ss -lntH "sport = :$PORT" | grep -q .; then
+    fail "port $PORT is already listening"
+  fi
+fi
+
+printf 'preflight passed\n'
+printf '  architecture: %s\n' "$ARCH"
+printf '  GPU: %s\n' "$GPU_NAME"
+printf '  model: %s\n' "$MODEL_DIR"
+printf '  API port: %s\n' "$PORT"

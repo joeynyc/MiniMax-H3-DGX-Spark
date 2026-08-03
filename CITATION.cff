@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If this compatibility work helped your research, cite this repository and the upstream projects."
+title: "MiniMax H3 on one NVIDIA DGX Spark"
+type: software
+authors:
+  - family-names: Rodriguez
+    given-names: Joey
+repository-code: "https://github.com/joeynyc/MiniMax-H3-DGX-Spark"
+license: Apache-2.0
+version: 1.0.0
+date-released: 2026-08-03

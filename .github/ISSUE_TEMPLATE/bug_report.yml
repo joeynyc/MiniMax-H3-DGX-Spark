@@ -1,0 +1,51 @@
+name: Reproduction report
+description: Report a verified compatibility or runtime issue
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private addresses, model weights, or generated media. Confirm that your model use is authorized under the upstream MiniMax H3 license.
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware and GPU architecture
+      placeholder: NVIDIA DGX Spark, GB10, SM121, ARM64
+    validations:
+      required: true
+  - type: input
+    id: image
+    attributes:
+      label: Base-image digest
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Reproduction command
+      description: Remove private paths and values.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private infrastructure data, weights, and generated media.
+          required: true
+        - label: I reviewed the upstream MiniMax H3 license for my use and territory.
+          required: true

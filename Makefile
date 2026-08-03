@@ -1,0 +1,31 @@
+.PHONY: audit build down logs preflight smoke status test up verify
+
+preflight:
+	./scripts/preflight.sh
+
+build: preflight
+	docker compose build
+
+up: preflight
+	docker compose up -d
+
+logs:
+	docker compose logs -f --tail=100
+
+status:
+	./scripts/status.sh
+
+smoke:
+	./scripts/smoke-t2va.sh
+
+verify:
+	./scripts/verify-output.sh output/smoke-t2va.mp4
+
+test:
+	./scripts/test-patch.sh
+
+audit:
+	./scripts/public-audit.sh
+
+down:
+	docker compose down

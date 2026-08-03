@@ -1,0 +1,11 @@
+.git
+.github
+.env
+.pytest_cache
+__pycache__
+output
+docs
+tests
+*.md
+LICENSE
+NOTICE

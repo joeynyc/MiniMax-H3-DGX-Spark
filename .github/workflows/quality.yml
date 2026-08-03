@@ -1,0 +1,37 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Audit public contents
+        run: ./scripts/public-audit.sh
+
+      - name: Check shell syntax
+        run: bash -n start-fp8.sh scripts/*.sh
+
+      - name: Run ShellCheck
+        run: shellcheck start-fp8.sh scripts/*.sh
+
+      - name: Validate JSON
+        run: python -m json.tool fp8-quant.json >/dev/null
+
+      - name: Validate Compose interpolation
+        run: |
+          mkdir -p /tmp/minimax-h3-model/transformer /tmp/hf-cache
+          touch /tmp/minimax-h3-model/model_index.json
+          cp .env.example .env
+          sed -i 's|MINIMAX_H3_LICENSE_ACKNOWLEDGED=false|MINIMAX_H3_LICENSE_ACKNOWLEDGED=true|' .env
+          sed -i 's|/absolute/path/to/MiniMax-H3/FL2VA|/tmp/minimax-h3-model|' .env
+          sed -i 's|/absolute/path/to/.cache/huggingface|/tmp/hf-cache|' .env
+          docker compose config --quiet
