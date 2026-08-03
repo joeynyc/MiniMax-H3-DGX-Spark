@@ -41,7 +41,9 @@ CACHE_DIR="${HF_CACHE_DIR:-}"
 [[ -d "$CACHE_DIR" ]] || fail "HF_CACHE_DIR does not exist: $CACHE_DIR"
 
 PORT="${H3_API_PORT:-8000}"
-[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || fail "invalid H3_API_PORT: $PORT"
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+  fail "invalid H3_API_PORT: $PORT"
+fi
 
 RUNNING="$(docker inspect minimax-h3-fl2va --format '{{.State.Running}}' 2>/dev/null || true)"
 if [[ "$RUNNING" != "true" ]]; then
