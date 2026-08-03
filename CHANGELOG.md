@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1 - 2026-08-03
+
+- Changed the default API bind from all interfaces to loopback-only.
+- Added fail-closed remote-access acknowledgement, bearer-token authentication,
+  `.env` permission checks, and authenticated status/smoke requests.
+- Expanded the public audit across reachable history to reject private and
+  Tailscale/CGNAT addresses, personal paths, credentials, and generated media.
+- Documented the firewall, TLS, rate-limit, and `--trust-remote-code` boundaries.
+
 ## 1.0.0 - 2026-08-03
 
 - Published the measured single-DGX-Spark FL2VA compatibility recipe.
