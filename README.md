@@ -74,7 +74,7 @@ Prerequisites:
 - Docker with Compose and NVIDIA GPU support
 - At least 110 GiB of memory available before launch
 - A complete MiniMax H3 FL2VA checkpoint
-- FFmpeg (optional, ffprobe needed for smoke tests)
+- FFmpeg tools installed
 - Authorization to use MiniMax H3 in your territory
 
 ```bash
