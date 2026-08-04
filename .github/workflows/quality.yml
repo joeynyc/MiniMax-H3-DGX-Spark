@@ -31,6 +31,9 @@ jobs:
       - name: Validate JSON
         run: python -m json.tool fp8-quant.json >/dev/null
 
+      - name: Verify runtime pin consistency
+        run: ./scripts/check-runtime-pin.sh
+
       - name: Validate Compose interpolation
         run: |
           mkdir -p /tmp/minimax-h3-model/transformer /tmp/hf-cache

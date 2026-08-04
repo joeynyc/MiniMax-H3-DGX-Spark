@@ -23,20 +23,29 @@ AUTH_ARGS=()
 if [[ -n "${H3_API_KEY:-}" ]]; then
   AUTH_ARGS=(-H "Authorization: Bearer ${H3_API_KEY}")
 fi
+PROMPT="${PROMPT:-Macro soldering a PCB under warm bench light, soft room tone.}"
+WIDTH="${WIDTH:-768}"
+HEIGHT="${HEIGHT:-448}"
+STEPS="${STEPS:-20}"
+FLOW_SHIFT="${FLOW_SHIFT:-12}"
+SEED="${SEED:-42}"
+FPS="${FPS:-24}"
+DURATION="${DURATION:-2.0}"
+AUDIO_FLOW_SHIFT="${AUDIO_FLOW_SHIFT:-3.0}"
 
 mkdir -p "$(dirname "$OUT")" "$(dirname "$LOG")"
 rm -f "$PART"
 
 START_NS="$(date +%s%N)"
 HTTP_CODE="$(curl -sS "${AUTH_ARGS[@]}" -X POST "$BASE_URL/v1/videos/sync" \
-  -F "prompt=Macro soldering a PCB under warm bench light, soft room tone." \
-  -F "width=768" \
-  -F "height=448" \
-  -F "num_inference_steps=20" \
-  -F "flow_shift=12" \
-  -F "seed=42" \
-  -F "fps=24" \
-  -F 'extra_params={"task":"t2va","duration":2.0,"audio_flow_shift":3.0}' \
+  -F "prompt=$PROMPT" \
+  -F "width=$WIDTH" \
+  -F "height=$HEIGHT" \
+  -F "num_inference_steps=$STEPS" \
+  -F "flow_shift=$FLOW_SHIFT" \
+  -F "seed=$SEED" \
+  -F "fps=$FPS" \
+  -F "extra_params={\"task\":\"t2va\",\"duration\":$DURATION,\"audio_flow_shift\":$AUDIO_FLOW_SHIFT}" \
   --output "$PART" \
   -w '%{http_code}')"
 END_NS="$(date +%s%N)"
