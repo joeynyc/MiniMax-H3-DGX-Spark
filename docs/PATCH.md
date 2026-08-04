@@ -11,9 +11,9 @@ different layers of the stack on GB10.
 | BF16 with offload | Unified-memory use approached 118–119 GiB, leaving no practical request headroom | Rejected for one Spark |
 | Online INT8 | Request reached `dispatch_scaled_mm`, which reported INT8 unsupported on SM121 | Rejected |
 | First online FP8 | Custom H3 loader accepted two arguments while FP8 replayed a native three-argument loader | Repair loader contract |
-| Compiled FP8 | Triton could not lower the FP8 scalar used by the compiled activation quantizer on SM121 | Bind the already-supported native CUDA op |
+| Initial compiled FP8 | Triton could not lower the FP8 scalar used by the compiled activation quantizer on SM121 | Bind the already-supported native CUDA op, then independently re-test regional compile |
 | Native FP8 | AdaLN converted its activation to the now-FP8 weight dtype before activation quantization | Keep AdaLN input BF16 |
-| FlashAttention-4 | CuTe variable-length attention failed to compile for H3's packed sequence shape | Select PyTorch SDPA |
+| FlashAttention-4 | CuTe variable-length attention failed to compile for H3's packed sequence shape | Reject FA4; independently test SDPA and cuDNN |
 
 ## Loader correction
 
@@ -43,14 +43,21 @@ lets the linear quantization method handle conversion.
 
 ## Deliberate runtime settings
 
-- `--enforce-eager`: avoids the regional/QuantFP8 compile path that failed on
-  SM121.
-- `--diffusion-attention-backend TORCH_SDPA`: avoids the failing FA4 CuTe
-  variable-length kernel.
+- `--diffusion-attention-backend CUDNN_ATTN`: the fastest stable full-compute
+  attention backend in the one-Spark sweep; SDPA remains an accepted baseline.
+- regional compile: independently completed cold start and decoded requests
+  after the native-CUDA FP8 quantizer correction; 52 repeated H3 blocks were
+  compiled.
 - `--force-cutlass-fp8`: retains the working CUTLASS FP8 linear path.
 - six ignored projection/output layers: preserves the model's existing
   sensitive-layer precision contract.
 
-Every item is narrow by design. Any upstream-image or backend change should be
-treated as a new configuration and revalidated from cold start through decoded
-audio-video output.
+The optional Cache-DiT profile is not part of the compatibility patch. It is a
+runtime acceleration with approximate output reuse and is disabled by default.
+Its accepted `0.10` configuration and same-seed quality measurements are in
+[RESULTS.md](RESULTS.md).
+
+Every item is narrow by design. Any upstream-image, attention backend,
+execution mode, cache configuration, or patch change should be treated as a
+new configuration and revalidated from cold start through decoded audio-video
+output.

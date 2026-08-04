@@ -7,5 +7,5 @@ authors:
     given-names: Joey
 repository-code: "https://github.com/joeynyc/MiniMax-H3-DGX-Spark"
 license: Apache-2.0
-version: 1.0.1
-date-released: 2026-08-03
+version: 1.1.0
+date-released: 2026-08-04

@@ -58,6 +58,39 @@ if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   fail "invalid H3_API_PORT: $PORT"
 fi
 
+VIDEO_SYNC_TIMEOUT="${H3_VIDEO_SYNC_TIMEOUT:-7200}"
+if [[ ! "$VIDEO_SYNC_TIMEOUT" =~ ^[0-9]+$ ]] || (( VIDEO_SYNC_TIMEOUT < 600 || VIDEO_SYNC_TIMEOUT > 14400 )); then
+  fail "H3_VIDEO_SYNC_TIMEOUT must be an integer from 600 to 14400 seconds"
+fi
+
+ATTENTION_BACKEND="${H3_DIFFUSION_ATTENTION_BACKEND:-CUDNN_ATTN}"
+EXECUTION_MODE="${H3_EXECUTION_MODE:-compile}"
+CACHE_BACKEND="${H3_CACHE_BACKEND:-none}"
+CACHE_CONFIG="${H3_CACHE_CONFIG:-}"
+
+case "$ATTENTION_BACKEND" in
+  TORCH_SDPA|CUDNN_ATTN) ;;
+  *) fail "H3_DIFFUSION_ATTENTION_BACKEND must be TORCH_SDPA or CUDNN_ATTN" ;;
+esac
+case "$EXECUTION_MODE" in
+  eager|compile) ;;
+  *) fail "H3_EXECUTION_MODE must be eager or compile" ;;
+esac
+case "$CACHE_BACKEND" in
+  none|cache_dit) ;;
+  *) fail "H3_CACHE_BACKEND must be none or cache_dit" ;;
+esac
+if [[ -n "$CACHE_CONFIG" ]]; then
+  python3 -c 'import json,sys; value=json.loads(sys.argv[1]); assert isinstance(value, dict)' "$CACHE_CONFIG" ||
+    fail "H3_CACHE_CONFIG must be a JSON object"
+fi
+if [[ "$CACHE_BACKEND" == none && -n "$CACHE_CONFIG" ]]; then
+  fail "cache configuration requires H3_CACHE_BACKEND=cache_dit"
+fi
+if [[ "$CACHE_BACKEND" == cache_dit && -z "$CACHE_CONFIG" ]]; then
+  fail "H3_CACHE_BACKEND=cache_dit requires an explicit tested H3_CACHE_CONFIG"
+fi
+
 RUNNING="$(docker inspect minimax-h3-fl2va --format '{{.State.Running}}' 2>/dev/null || true)"
 if [[ "$RUNNING" != "true" ]]; then
   AVAILABLE_KIB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
@@ -75,6 +108,10 @@ printf '  GPU: %s\n' "$GPU_NAME"
 printf '  model: %s\n' "$MODEL_DIR"
 printf '  API bind: %s\n' "$BIND_HOST"
 printf '  API port: %s\n' "$PORT"
+printf '  synchronous request timeout: %s seconds\n' "$VIDEO_SYNC_TIMEOUT"
+printf '  attention: %s\n' "$ATTENTION_BACKEND"
+printf '  execution: %s\n' "$EXECUTION_MODE"
+printf '  cache: %s\n' "$CACHE_BACKEND"
 if [[ -n "${H3_API_KEY:-}" ]]; then
   printf '  API authentication: enabled\n'
 else

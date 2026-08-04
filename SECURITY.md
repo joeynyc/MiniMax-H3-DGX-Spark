@@ -37,6 +37,11 @@ model repositories.
 Treat prompts and generated output as sensitive. The project deliberately
 keeps `.env`, model weights, caches, logs, and generated media out of Git.
 
+The benchmark and quality scripts write request metadata, hashes, logs,
+decoded inspection frames, and media under ignored `output/`. Review that
+directory separately before sharing diagnostics. Never stage it, and replace
+private paths or endpoint details with generic placeholders in public reports.
+
 The Compose service deliberately has no restart policy and does not use
 privileged mode. Review all container, model, and model-license changes before
 upgrading the pinned base-image digest.

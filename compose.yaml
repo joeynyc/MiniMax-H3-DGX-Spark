@@ -17,7 +17,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       VLLM_WORKER_MULTIPROC_METHOD: spawn
-      VLLM_OMNI_VIDEO_SYNC_TIMEOUT: "1800"
+      VLLM_OMNI_VIDEO_SYNC_TIMEOUT: ${H3_VIDEO_SYNC_TIMEOUT:-7200}
       FLASHINFER_DISABLE_VERSION_CHECK: "1"
       HF_HOME: /root/.cache/huggingface
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -25,6 +25,10 @@ services:
       H3_API_PORT: ${H3_API_PORT:-8000}
       H3_ALLOW_REMOTE_API: ${H3_ALLOW_REMOTE_API:-false}
       VLLM_API_KEY: ${H3_API_KEY:-}
+      H3_DIFFUSION_ATTENTION_BACKEND: ${H3_DIFFUSION_ATTENTION_BACKEND:-CUDNN_ATTN}
+      H3_EXECUTION_MODE: ${H3_EXECUTION_MODE:-compile}
+      H3_CACHE_BACKEND: ${H3_CACHE_BACKEND:-none}
+      H3_CACHE_CONFIG: ${H3_CACHE_CONFIG:-}
     volumes:
       - ${MINIMAX_H3_MODEL_DIR:?Set MINIMAX_H3_MODEL_DIR in .env}:/models/MiniMax-H3/FL2VA:ro
       - ${HF_CACHE_DIR:?Set HF_CACHE_DIR in .env}:/root/.cache/huggingface
