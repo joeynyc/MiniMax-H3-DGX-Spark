@@ -41,6 +41,29 @@ the weight remains BF16, but online quantization replaces it with an FP8
 parameter. The corrected path explicitly keeps the AdaLN activation BF16 and
 lets the linear quantization method handle conversion.
 
+## H3 inference optimizations
+
+The image also carries four behavior-preserving H3 changes developed against
+upstream vLLM-Omni and adapted to this older pinned runtime:
+
+1. build each packed attention mask once per request instead of once per
+   transformer layer;
+2. use vLLM's fused `SiluAndMul` implementation for SwiGLU;
+3. refine prompt embeddings and compute RoPE once before the denoise loop; and
+4. use direct indexed assignment for modality embeddings whose packed rows are
+   disjoint.
+
+The prompt/RoPE change touches the pinned denoise loop and pipeline as well as
+the transformer. `minimax_h3_static_conditioning.patch` applies those two
+narrow call-site changes during the image build. The transformer retains the
+raw-conditioning fallback for direct callers.
+
+These changes preserve the Spark-specific native-CUDA FP8 binding. They do not
+enable compilation, replace SDPA, change inference steps, or alter precision.
+The fixed-seed acceptance comparison is recorded in
+[RESULTS.md](RESULTS.md); normal run-to-run system variance means its timing is
+evidence for a useful improvement, not a universal throughput claim.
+
 ## Deliberate runtime settings
 
 - `--diffusion-attention-backend CUDNN_ATTN`: the fastest stable full-compute

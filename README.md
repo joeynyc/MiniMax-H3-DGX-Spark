@@ -39,7 +39,7 @@ inspectable, and repeatable.
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 5 passed in the exact pinned image |
+| Regression tests | 10 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request
@@ -71,6 +71,12 @@ FlashAttention-4's CuTe variable-length kernel also failed for this packed H3
 shape on SM121. The measured release supports SDPA and cuDNN attention; cuDNN
 with regional compile is the full-compute default. See
 [docs/PATCH.md](docs/PATCH.md) for the failure chain and why each change exists.
+
+The image additionally includes four upstream-oriented H3 inference
+optimizations: request-level packed-mask reuse, fused SwiGLU, static
+prompt/RoPE conditioning, and direct modality embedding scatters. These are
+kept separate from the SM121 compatibility rationale and are covered by the
+same pinned-image regression suite.
 
 ## Quick start
 
@@ -138,7 +144,7 @@ to the public internet.
 |---|---|
 | `Dockerfile` | Builds on the exact verified base-image digest |
 | `compose.yaml` | Portable single-GPU service without host-specific paths |
-| `patches/` | Apache-2.0 H3 compatibility module with modification notice |
+| `patches/` | Apache-2.0 H3 compatibility and inference patches with modification notice |
 | `scripts/preflight.sh` | Architecture, memory, model, port, license, and network-safety checks |
 | `scripts/security-common.sh` | Shared fail-closed loopback/remote-access policy |
 | `scripts/smoke-t2va.sh` | Fail-closed T2VA acceptance request |
@@ -146,7 +152,7 @@ to the public internet.
 | `scripts/benchmark-profile.sh` | Cold start, warm requests, identity, OOM, memory, and swap capture |
 | `scripts/compare-quality.sh` | Frame-aligned SSIM/PSNR, audio comparison, and inspection frames |
 | `scripts/runtime-provenance.sh` | Exact image ID, architecture, and runtime-version check |
-| `tests/` | Focused loader/FP8/AdaLN regression coverage |
+| `tests/` | Focused loader, FP8, AdaLN, packaging, profile, and optimization regressions |
 | `docs/RESULTS.md` | Exact measured acceptance evidence |
 | `docs/REPRODUCIBILITY.md` | Profiles, workload, warm-up, and quality-comparison method |
 | `docs/TROUBLESHOOTING.md` | Symptom-to-cause guidance from the bring-up |
@@ -173,6 +179,11 @@ to the public internet.
 - [vLLM-Omni](https://github.com/vllm-project/vllm-omni)
 - [Upstream H3 recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/MiniMaxAI/MiniMax-H3.md)
 - [H3 support pull request](https://github.com/vllm-project/vllm-omni/pull/5691)
+- Upstream optimization pull requests:
+  [mask reuse](https://github.com/vllm-project/vllm-omni/pull/5817),
+  [fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/5818),
+  [static conditioning](https://github.com/vllm-project/vllm-omni/pull/5819), and
+  [direct embedding scatters](https://github.com/vllm-project/vllm-omni/pull/5820)
 
 Thanks to [@riverar](https://github.com/riverar) for catching the missing
 FFmpeg prerequisite in [PR #2](https://github.com/joeynyc/MiniMax-H3-DGX-Spark/pull/2).

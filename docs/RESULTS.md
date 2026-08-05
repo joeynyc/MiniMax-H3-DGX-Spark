@@ -212,12 +212,48 @@ warm runs within each profile produced matching SHA-256 hashes.
 The generated artifacts are not distributed in this public repository. See
 [the model-license notice](../MODEL-LICENSE.md).
 
+## Cumulative optimization A/B
+
+On 2026-08-05, the same request above was repeated around the four cumulative
+H3 inference optimizations described in [PATCH.md](PATCH.md). The baseline was
+captured from the already-running compatibility image. The optimized image was
+then cold-started and rendered twice without changing the request.
+
+| Measurement | Baseline | Optimized first | Optimized repeat |
+|---|---:|---:|---:|
+| HTTP wall time | 168.169 s | 158.221 s | 151.578 s |
+| Server generation stage | 157.536 s | 155.366 s | 148.049 s |
+| Mean denoising step | 7.877 s | 7.768 s | 7.402 s |
+| MP4 response encoding | 10.602 s | 2.723 s | 3.493 s |
+| Full FFmpeg decode | Passed | Passed | Passed |
+| Video frames | 56 | 56 | 56 |
+| Audio | AAC-LC stereo, 32 kHz | Same | Same |
+
+Relative to the captured baseline, optimized server generation improved by
+1.38% on the first request and 6.02% on the immediate repeat. HTTP wall time
+improved by 5.92% and 9.87%, respectively, but most of the first wall-time
+difference came from variable MP4 encoding and must not be attributed to the
+model changes.
+
+The two optimized renders decoded to byte-identical raw video frames. Compared
+with the baseline, the optimized trajectory was visually coherent and
+comparably detailed but not pixel-identical (video SSIM 0.745). Diffusion can
+amplify small floating-point changes, so this is an output-integrity check, not
+a formal quality equivalence result. The earlier acceptance timing on this
+same machine also demonstrates material system variance; use repeated local
+measurements before making capacity claims.
+
 ## Patch tests
 
-Five focused tests passed inside the exact base image:
+Ten focused tests passed inside the exact built image, covering:
 
 1. grouped QKV layout normalization;
 2. native parameter-loader contract preservation;
 3. fused fc1 layout validation;
 4. native CUDA FP8 activation-quantizer binding; and
-5. BF16 AdaLN activation input after FP8 weight conversion.
+5. BF16 AdaLN activation input after FP8 weight conversion;
+6. packed attention-mask construction and propagation;
+7. static-conditioning branch wiring and raw-input fallback;
+8. pipeline-level conditioning preparation;
+9. fused SwiGLU selection; and
+10. direct modality embedding assignment.
