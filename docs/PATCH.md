@@ -14,6 +14,10 @@ different layers of the stack on GB10.
 | Initial compiled FP8 | Triton could not lower the FP8 scalar used by the compiled activation quantizer on SM121 | Bind the already-supported native CUDA op, then independently re-test regional compile |
 | Native FP8 | AdaLN converted its activation to the now-FP8 weight dtype before activation quantization | Keep AdaLN input BF16 |
 | FlashAttention-4 | CuTe variable-length attention failed to compile for H3's packed sequence shape | Reject FA4; independently test SDPA and cuDNN |
+| First Humming load | GB10 does not expose a usable NVML maximum memory clock or bus width | Fall back to GB10 CUDA device properties only |
+| Humming weight conversion | Online FP8 left a transposed `[K, N]` view while Humming requires contiguous `[N, K]` | Restore and validate the canonical layout |
+| Humming activation conversion | The adapter omitted the online activation schema and silently built a BF16-input kernel | Pass the dynamic per-token FP8 schema explicitly |
+| Humming fixed-seed repeat | Stream-K changed the large QKV reduction order between launches | Select Humming's batch-invariant scheduler without enabling vLLM's global BF16 fallback |
 
 ## Loader correction
 
@@ -64,6 +68,31 @@ The fixed-seed acceptance comparison is recorded in
 [RESULTS.md](RESULTS.md); normal run-to-run system variance means its timing is
 evidence for a useful improvement, not a universal throughput claim.
 
+## Humming FP8 correction
+
+The installed Humming kernel can consume H3's existing online-FP8 contract:
+dynamic per-token E4M3 activations, static per-tensor E4M3 weights, BF16 output,
+and FP32 accumulation. Three integration details prevented it from being a
+safe drop-in replacement.
+
+First, Humming's bandwidth heuristic queried NVML fields that GB10 does not
+currently expose. The compatibility patch falls back to CUDA's reported
+8,533,000 kHz memory clock and 256-bit bus only when the device identifies as
+GB10; unknown devices still fail rather than receiving a guessed value.
+Second, online FP8 stores the CUTLASS-friendly transposed weight view, so the
+adapter restores contiguous `[N, K]` storage and rejects any other unexpected
+shape or stride. Third, the original adapter did not pass its activation
+quantization key to `prepare_humming_layer`, producing a BF16-input kernel.
+The corrected adapter explicitly translates the dynamic per-token key into
+Humming's input schema.
+
+Humming's default Stream-K schedule was not fixed-seed repeatable for H3's
+large QKV projection on GB10. `VLLM_HUMMING_BATCH_INVARIANT=1` disables that
+schedule inside Humming only. The launcher deliberately does not set vLLM's
+global `VLLM_BATCH_INVARIANT`, because the online-FP8 method interprets that
+global setting by dequantizing non-CUTLASS weights and running BF16 linear
+operations instead.
+
 ## Deliberate runtime settings
 
 - `--diffusion-attention-backend CUDNN_ATTN`: the fastest stable full-compute
@@ -71,7 +100,12 @@ evidence for a useful improvement, not a universal throughput claim.
 - regional compile: independently completed cold start and decoded requests
   after the native-CUDA FP8 quantizer correction; 52 repeated H3 blocks were
   compiled.
-- `--force-cutlass-fp8`: retains the working CUTLASS FP8 linear path.
+- `--force-cutlass-fp8`: retains the fastest validated full-compute linear
+  path and is the default.
+- `H3_LINEAR_BACKEND=HUMMING`: selects the corrected deterministic Humming
+  path only for the historical eager/no-cache profile. The launcher rejects
+  combinations with regional compile or Cache-DiT because they were not
+  validated together.
 - six ignored projection/output layers: preserves the model's existing
   sensitive-layer precision contract.
 
@@ -81,6 +115,6 @@ Its accepted `0.10` configuration and same-seed quality measurements are in
 [RESULTS.md](RESULTS.md).
 
 Every item is narrow by design. Any upstream-image, attention backend,
-execution mode, cache configuration, or patch change should be treated as a
-new configuration and revalidated from cold start through decoded audio-video
-output.
+execution mode, cache configuration, linear backend, or patch change should
+be treated as a new configuration and revalidated from cold start through
+decoded audio-video output.

@@ -29,6 +29,7 @@ services:
       H3_EXECUTION_MODE: ${H3_EXECUTION_MODE:-compile}
       H3_CACHE_BACKEND: ${H3_CACHE_BACKEND:-none}
       H3_CACHE_CONFIG: ${H3_CACHE_CONFIG:-}
+      H3_LINEAR_BACKEND: ${H3_LINEAR_BACKEND:-CUTLASS}
     volumes:
       - ${MINIMAX_H3_MODEL_DIR:?Set MINIMAX_H3_MODEL_DIR in .env}:/models/MiniMax-H3/FL2VA:ro
       - ${HF_CACHE_DIR:?Set HF_CACHE_DIR in .env}:/root/.cache/huggingface

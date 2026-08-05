@@ -13,6 +13,16 @@ RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages/vllm_omni/diffusion/models/minimax_h3 \
       < /tmp/minimax_h3_static_conditioning.patch \
     && rm /tmp/minimax_h3_static_conditioning.patch
+COPY --chmod=0644 patches/humming_gb10_bandwidth.patch /tmp/humming_gb10_bandwidth.patch
+RUN patch --batch --forward -p0 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/humming_gb10_bandwidth.patch \
+    && rm /tmp/humming_gb10_bandwidth.patch
+COPY --chmod=0644 patches/humming_online_fp8_layout.patch /tmp/humming_online_fp8_layout.patch
+RUN patch --batch --forward -p0 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/humming_online_fp8_layout.patch \
+    && rm /tmp/humming_online_fp8_layout.patch
 COPY --chmod=0755 start-fp8.sh /usr/local/bin/start-minimax-h3
 COPY --chmod=0644 scripts/security-common.sh /usr/local/lib/minimax-h3/security-common.sh
 COPY --chmod=0644 fp8-quant.json /etc/minimax-h3/fp8-quant.json

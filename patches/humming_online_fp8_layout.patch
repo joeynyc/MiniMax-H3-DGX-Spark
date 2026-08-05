@@ -1,0 +1,89 @@
+--- vllm/model_executor/kernels/linear/scaled_mm/humming.py
++++ vllm/model_executor/kernels/linear/scaled_mm/humming.py
+@@ -2,5 +2,8 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++import json
++import os
++
+ import torch
+ 
+ from vllm.logger import init_logger
+@@ -20,6 +23,62 @@
+ logger = init_logger(__name__)
+ 
+ 
++def _online_fp8_input_quant_config(config: FP8ScaledMMLinearLayerConfig) -> dict:
++    """Translate vLLM's activation key to Humming's input quantizer config."""
++
++    scale = config.activation_quant_key.scale
++    group_shape = scale.group_shape
++    if scale.static:
++        raise ValueError("Humming online FP8 requires dynamic activation scales")
++    if group_shape.is_per_token():
++        group_size = 0
++    elif group_shape.is_per_group():
++        group_size = group_shape.col
++    else:
++        raise ValueError(
++            "Humming online FP8 requires per-token or per-group activation scales"
++        )
++
++    return {
++        "quant_method": "humming",
++        "dtype": "float8e4m3",
++        "group_size": group_size,
++    }
++
++
++def _configure_humming_online_fp8_compute(layer: torch.nn.Module) -> None:
++    """Apply the Humming-only deterministic scheduler setting when requested."""
++
++    if os.environ.get("VLLM_HUMMING_BATCH_INVARIANT", "0") != "1":
++        return
++    compute_config = json.loads(layer.compute_config)
++    compute_config["use_batch_invariant"] = True
++    layer.compute_config = json.dumps(compute_config)
++
++
++def _restore_canonical_online_fp8_weight_layout(layer: torch.nn.Module) -> None:
++    """Restore the [N, K] layout Humming expects after online FP8 packing."""
++
++    weight = layer.weight
++    expected_shape = (
++        sum(layer.output_partition_sizes),
++        layer.input_size_per_partition,
++    )
++
++    if weight.stride(-1) != 1:
++        if weight.ndim != 2 or weight.stride(0) != 1:
++            raise ValueError(f"unsupported online FP8 weight strides: {weight.stride()}")
++        weight.data = weight.t().contiguous()
++    elif not weight.is_contiguous():
++        weight.data = weight.contiguous()
++
++    if tuple(weight.shape) != expected_shape:
++        raise ValueError(
++            "online FP8 weight layout mismatch after normalization: "
++            f"{tuple(weight.shape)} != {expected_shape}"
++        )
++
++
+ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+     """Humming GEMM Kernel for FP8."""
+ 
+@@ -75,6 +134,13 @@
+             if hasattr(layer, "weight_scale_inv"):
+                 name_map["weight_scale"] = "weight_scale_inv"
+ 
++        _restore_canonical_online_fp8_weight_layout(layer)
+         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
+-        prepare_humming_layer(layer, quant_config)
++        input_quant_config = _online_fp8_input_quant_config(self.config)
++        prepare_humming_layer(
++            layer,
++            quant_config,
++            input_quant_config=input_quant_config,
++        )
++        _configure_humming_online_fp8_compute(layer)
+ 

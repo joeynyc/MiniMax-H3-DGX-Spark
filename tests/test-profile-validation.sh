@@ -34,5 +34,13 @@ expect_refuse 'requires an explicit tested H3_CACHE_CONFIG' \
   -e H3_CACHE_BACKEND=cache_dit -e H3_CACHE_CONFIG=
 expect_refuse 'H3_CACHE_CONFIG must be a JSON object' \
   -e H3_CACHE_BACKEND=cache_dit -e H3_CACHE_CONFIG=not-json
+expect_refuse 'H3_LINEAR_BACKEND must be' \
+  -e H3_LINEAR_BACKEND=unsupported
+expect_refuse 'H3_LINEAR_BACKEND=HUMMING requires H3_EXECUTION_MODE=eager' \
+  -e H3_LINEAR_BACKEND=HUMMING -e H3_EXECUTION_MODE=compile
+expect_refuse 'H3_LINEAR_BACKEND=HUMMING requires H3_CACHE_BACKEND=none' \
+  -e H3_LINEAR_BACKEND=HUMMING -e H3_EXECUTION_MODE=eager \
+  -e H3_CACHE_BACKEND=cache_dit \
+  -e 'H3_CACHE_CONFIG={"threshold":0.10}'
 
 echo 'container profile validation tests passed'

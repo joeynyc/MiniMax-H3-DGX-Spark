@@ -15,4 +15,6 @@ docker run --rm --entrypoint python \
   "$TEST_IMAGE" \
   -m pytest -q -p no:cacheprovider \
   /tests/test_h3_loader_patch.py \
-  /tests/test_h3_runtime_optimizations.py
+  /tests/test_h3_runtime_optimizations.py \
+  /tests/test_humming_gb10_bandwidth.py \
+  /tests/test_humming_online_fp8_layout.py

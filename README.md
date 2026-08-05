@@ -30,7 +30,7 @@ inspectable, and repeatable.
 | Hardware | 1x DGX Spark, GB10, ARM64, SM121, 128 GB-class unified memory |
 | Runtime | Pinned `vllm/vllm-omni:minimax-h3` ARM64 image |
 | Checkpoint | MiniMax H3 FL2VA, approximately 135 GiB on disk |
-| Quantization | Online dynamic FP8; six sensitive projections kept unquantized |
+| Quantization | Online dynamic FP8; CUTLASS default, deterministic Humming eager alternative |
 | Full-compute default | cuDNN attention + regional compile, no cache |
 | Optional balanced profile | cuDNN + regional compile + Cache-DiT at `0.10` |
 | Model load | 89.1659 GiB; 519–543 seconds across cold starts |
@@ -39,7 +39,7 @@ inspectable, and repeatable.
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 10 passed in the exact pinned image |
+| Regression tests | 16 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request
@@ -78,6 +78,14 @@ prompt/RoPE conditioning, and direct modality embedding scatters. These are
 kept separate from the SM121 compatibility rationale and are covered by the
 same pinned-image regression suite.
 
+The image also repairs three Humming integration gaps: GB10 bandwidth
+discovery, online-FP8 weight layout, and dynamic activation-schema
+propagation. Its deterministic scheduler passed repeated fixed-seed eager
+renders. That historical eager-only experiment is retained as an explicit
+alternative, not the default: the newer cuDNN/compile/CUTLASS profile above is
+faster in the measured full-compute comparison. Select Humming only with
+`H3_EXECUTION_MODE=eager` and `H3_CACHE_BACKEND=none`; exact evidence is in
+[docs/RESULTS.md](docs/RESULTS.md).
 ## Quick start
 
 Prerequisites:
@@ -170,7 +178,7 @@ to the public internet.
 - Cache-DiT is approximate. Its measured same-seed SSIM/PSNR results are not a
   guarantee for a different prompt, seed, resolution, step count, or runtime.
 - Re-run the full acceptance flow before changing the base-image digest,
-  attention backend, execution mode, cache settings, or patch.
+  attention backend, execution mode, cache settings, linear backend, or patch.
 
 ## Upstream and attribution
 

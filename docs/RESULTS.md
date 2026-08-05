@@ -26,6 +26,7 @@ Generated artifacts, frames, request logs, and model weights are not included.
 | Model | MiniMax H3 FL2VA, served as `/models/MiniMax-H3/FL2VA` |
 | Quantization | Online dynamic FP8; six sensitive layers ignored |
 | FP8 linear backend | CUTLASS |
+| Optional FP8 linear backend | Deterministic Humming, eager/no-cache only |
 
 The image emitted a vLLM/vLLM-Omni major/minor mismatch warning. It is recorded
 here rather than hidden; this exact pinned combination passed the measured
@@ -243,17 +244,69 @@ a formal quality equivalence result. The earlier acceptance timing on this
 same machine also demonstrates material system variance; use repeated local
 measurements before making capacity claims.
 
+## Historical eager-only Humming FP8 GEMM A/B
+
+The four dominant linear shapes were benchmarked with the same online-FP8
+contract used by H3: dynamic per-token E4M3 activations, static per-tensor E4M3
+weights, BF16 output, and FP32 accumulation. Humming's batch-invariant
+scheduler completed the four-linears set in approximately 74.2 ms versus 81.6
+ms for CUTLASS in the five-launch isolated test. The large QKV projection was
+bit-repeatable with the batch-invariant scheduler and changed by as much as
+0.0625 BF16 units between launches with Humming's default Stream-K schedule.
+
+The full model was then cold-started in the older cuDNN/eager/no-cache profile
+with corrected Humming activation-schema and weight-layout handling. It
+reported 89.1669 GiB and 479.475 seconds for model loading. The fixed-seed
+acceptance request was rendered twice.
+
+| Measurement | CUTLASS + cuDNN repeat | Humming first | Humming repeat |
+|---|---:|---:|---:|
+| HTTP wall time | 126.839 s | 147.769 s | 121.472 s |
+| Server generation stage | 125.241 s | 144.091 s | 117.494 s |
+| Mean denoising step | 6.262 s | 7.205 s | 5.875 s |
+| MP4 response encoding | 1.574 s | 3.550 s | 3.946 s |
+| Full FFmpeg decode | Passed | Passed | Passed |
+| Video frames | 56 | 56 | 56 |
+| Audio | AAC-LC stereo, 32 kHz | Same | Same |
+
+The first Humming request includes JIT work. On the immediate repeat, server
+generation and mean denoise-step latency improved by 6.19% relative to the
+profile-matched eager CUTLASS result; HTTP wall time improved by 4.23% because
+MP4 encoding varied independently.
+
+The two Humming renders had byte-identical decoded video frames. Their decoded
+audio differed only at approximately 164 dB PSNR, consistent with negligible
+AAC encoder-level variation. CUTLASS and Humming follow different valid FP32
+accumulation orders, so their diffusion trajectories were not pixel-identical
+(video SSIM 0.706). Contact-sheet inspection found both outputs coherent,
+detailed, and faithful to the macro PCB soldering prompt; this is an integrity
+check, not a formal perceptual-quality equivalence study.
+
+This experiment predates the current regional-compile/CUTLASS reconfirmation
+and is not directly comparable with its 111.373-second warmed client mean.
+Humming is therefore not selected by default. It remains a deterministic
+eager/no-cache alternative for operators who want to reproduce the isolated
+comparison; the launcher rejects Humming with compile or Cache-DiT.
+
 ## Patch tests
 
-Ten focused tests passed inside the exact built image, covering:
+Sixteen focused tests passed inside the exact built image, covering:
 
 1. grouped QKV layout normalization;
 2. native parameter-loader contract preservation;
 3. fused fc1 layout validation;
-4. native CUDA FP8 activation-quantizer binding; and
+4. native CUDA FP8 activation-quantizer binding;
 5. BF16 AdaLN activation input after FP8 weight conversion;
 6. packed attention-mask construction and propagation;
 7. static-conditioning branch wiring and raw-input fallback;
 8. pipeline-level conditioning preparation;
 9. fused SwiGLU selection; and
-10. direct modality embedding assignment.
+10. direct modality embedding assignment;
+11. guarded GB10 bandwidth discovery and unknown-device failure;
+12. canonical Humming online-FP8 weight restoration and validation;
+13. preservation of dynamic per-token Humming activation scaling; and
+14. Humming-only batch-invariant scheduler configuration.
+
+The remaining cases cover rejection paths within those categories. Launcher
+contract tests additionally verify that unrecognized attention and linear
+backends are rejected before model startup.
