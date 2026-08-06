@@ -14,6 +14,7 @@ EXECUTION_MODE="${H3_EXECUTION_MODE:-compile}"
 CACHE_BACKEND="${H3_CACHE_BACKEND:-none}"
 CACHE_CONFIG="${H3_CACHE_CONFIG:-}"
 LINEAR_BACKEND="${H3_LINEAR_BACKEND:-CUTLASS}"
+STARTUP_WARMUP="${H3_STARTUP_WARMUP:-true}"
 
 fail() {
   printf 'startup security check: %s\n' "$*" >&2
@@ -88,6 +89,17 @@ case "$LINEAR_BACKEND" in
     ;;
 esac
 
+case "$STARTUP_WARMUP" in
+  true)
+    export MINIMAX_H3_DUMMY_RUN_NUM_FRAMES=56
+    ;;
+  false)
+    export MINIMAX_H3_DUMMY_RUN_NUM_FRAMES=0
+    ;;
+  *)
+    fail "H3_STARTUP_WARMUP must be true or false"
+    ;;
+esac
 exec vllm serve "$MODEL_PATH" \
   --omni \
   --trust-remote-code \

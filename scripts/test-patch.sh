@@ -16,5 +16,9 @@ docker run --rm --entrypoint python \
   -m pytest -q -p no:cacheprovider \
   /tests/test_h3_loader_patch.py \
   /tests/test_h3_runtime_optimizations.py \
+  /tests/test_h3_startup_warmup.py \
   /tests/test_humming_gb10_bandwidth.py \
   /tests/test_humming_online_fp8_layout.py
+
+bash -n "$ROOT/scripts/acceptance-fixed-seed.sh"
+printf 'fixed-seed acceptance syntax validation passed\n'

@@ -42,5 +42,7 @@ expect_refuse 'H3_LINEAR_BACKEND=HUMMING requires H3_CACHE_BACKEND=none' \
   -e H3_LINEAR_BACKEND=HUMMING -e H3_EXECUTION_MODE=eager \
   -e H3_CACHE_BACKEND=cache_dit \
   -e 'H3_CACHE_CONFIG={"threshold":0.10}'
+expect_refuse 'H3_STARTUP_WARMUP must be' \
+  -e H3_STARTUP_WARMUP=unsupported
 
 echo 'container profile validation tests passed'

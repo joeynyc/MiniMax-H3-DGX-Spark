@@ -20,6 +20,9 @@ services:
       VLLM_OMNI_VIDEO_SYNC_TIMEOUT: ${H3_VIDEO_SYNC_TIMEOUT:-7200}
       FLASHINFER_DISABLE_VERSION_CHECK: "1"
       HF_HOME: /root/.cache/huggingface
+      HUMMING_CACHE_DIR: /root/.cache/minimax-h3-kernels/humming
+      TRITON_CACHE_DIR: /root/.cache/minimax-h3-kernels/triton
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/minimax-h3-kernels/torchinductor
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       H3_BIND_HOST: ${H3_BIND_HOST:-127.0.0.1}
       H3_API_PORT: ${H3_API_PORT:-8000}
@@ -30,7 +33,18 @@ services:
       H3_CACHE_BACKEND: ${H3_CACHE_BACKEND:-none}
       H3_CACHE_CONFIG: ${H3_CACHE_CONFIG:-}
       H3_LINEAR_BACKEND: ${H3_LINEAR_BACKEND:-CUTLASS}
+      H3_STARTUP_WARMUP: ${H3_STARTUP_WARMUP:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://$${H3_BIND_HOST}:$${H3_API_PORT}/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15m
     volumes:
       - ${MINIMAX_H3_MODEL_DIR:?Set MINIMAX_H3_MODEL_DIR in .env}:/models/MiniMax-H3/FL2VA:ro
       - ${HF_CACHE_DIR:?Set HF_CACHE_DIR in .env}:/root/.cache/huggingface
+      - h3-kernel-cache:/root/.cache/minimax-h3-kernels
       - ./output:/output
+
+volumes:
+  h3-kernel-cache:

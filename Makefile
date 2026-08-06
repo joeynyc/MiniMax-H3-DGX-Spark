@@ -1,4 +1,7 @@
-.PHONY: audit build down logs preflight profile-test provenance security-test smoke status test up verify
+.PHONY: acceptance audit build down logs preflight profile-test provenance security-test smoke status test up verify
+
+acceptance:
+	./scripts/acceptance-fixed-seed.sh
 
 preflight:
 	./scripts/preflight.sh

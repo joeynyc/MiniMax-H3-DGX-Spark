@@ -93,6 +93,24 @@ global `VLLM_BATCH_INVARIANT`, because the online-FP8 method interprets that
 global setting by dequantizing non-CUTLASS weights and running BF16 linear
 operations instead.
 
+## Production-shape startup warmup
+
+The generic vLLM-Omni diffusion warmup used one denoise step at 512x512 and
+added synthetic input conditions for every modality the model advertises.
+That is not a valid FL2VA text-to-video request: a one-entry sigma schedule is
+invalid, and FL2VA rejects the generic audio condition.
+
+The model now declares a two-step 768x448x56 text-only warmup. The shared
+diffusion engine reads optional model-class warmup attributes, while retaining
+its existing defaults for every other pipeline. Startup fails closed if this
+real generation path fails, and Compose does not report the service healthy
+until the API becomes available after warmup.
+
+Humming, Triton, and TorchInductor caches share a dedicated persistent Compose
+volume. Recreating the container therefore reuses kernels compiled by the
+startup warmup. The volume is tied to the pinned image and trusted runtime; it
+is not a portable artifact for arbitrary toolchain changes.
+
 ## Deliberate runtime settings
 
 - `--diffusion-attention-backend CUDNN_ATTN`: the fastest stable full-compute
@@ -106,6 +124,9 @@ operations instead.
   path only for the historical eager/no-cache profile. The launcher rejects
   combinations with regional compile or Cache-DiT because they were not
   validated together.
+- `H3_STARTUP_WARMUP=true`: gates readiness on a two-step production-shape
+  generation and seeds the persistent kernel caches. `false` is a diagnostic
+  rollback to the upstream lazy-first-request behavior.
 - six ignored projection/output layers: preserves the model's existing
   sensitive-layer precision contract.
 

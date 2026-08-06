@@ -33,13 +33,14 @@ inspectable, and repeatable.
 | Quantization | Online dynamic FP8; CUTLASS default, deterministic Humming eager alternative |
 | Full-compute default | cuDNN attention + regional compile, no cache |
 | Optional balanced profile | cuDNN + regional compile + Cache-DiT at `0.10` |
-| Model load | 89.1659 GiB; 519–543 seconds across cold starts |
+| Model load | 89.1659 GiB; 482–543 seconds across cold starts |
 | Baseline warmed request | 152.911 seconds client mean (sweep, two runs) |
 | Full-compute warmed request | 111.373 seconds client mean (final image, two runs) |
+| Review-candidate warmed request | 114.250 seconds client mean (two runs) |
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 16 passed in the exact pinned image |
+| Regression tests | 18 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request
@@ -86,6 +87,13 @@ alternative, not the default: the newer cuDNN/compile/CUTLASS profile above is
 faster in the measured full-compute comparison. Select Humming only with
 `H3_EXECUTION_MODE=eager` and `H3_CACHE_BACKEND=none`; exact evidence is in
 [docs/RESULTS.md](docs/RESULTS.md).
+
+Startup now performs a two-step warmup at the real 768x448x56 production shape
+before the health check can pass. Linear, Triton, and TorchInductor artifacts
+are stored in a dedicated Compose volume, so container recreation preserves
+compiled kernels. Set `H3_STARTUP_WARMUP=false` only as an explicit diagnostic
+rollback; it restores lazy first-request compilation and weakens readiness.
+
 ## Quick start
 
 Prerequisites:
@@ -110,8 +118,10 @@ make up
 make logs
 ```
 
-Cold startup took about nine minutes on the measured machine. Wait until both
-checks pass:
+Allow up to 15 minutes for a cold start; the current default review candidate
+reached application readiness in about nine minutes on the measured machine.
+`health: starting` is expected until both model loading and the
+production-shape warmup finish. Wait until both status checks pass:
 
 ```bash
 make status
@@ -122,6 +132,9 @@ Then, only where your model license permits generation and display:
 ```bash
 make smoke
 make verify
+# Optional but recommended after image/backend changes: two full fixed-seed
+# renders with decoded video, stereo audio, and kernel-fallback comparisons.
+make acceptance
 ```
 
 The default is the fastest validated full-compute profile. The optional
@@ -156,6 +169,7 @@ to the public internet.
 | `scripts/preflight.sh` | Architecture, memory, model, port, license, and network-safety checks |
 | `scripts/security-common.sh` | Shared fail-closed loopback/remote-access policy |
 | `scripts/smoke-t2va.sh` | Fail-closed T2VA acceptance request |
+| `scripts/acceptance-fixed-seed.sh` | Two-run decoded-frame, audio, and kernel-fallback acceptance gate |
 | `scripts/verify-output.sh` | Streams, full decode, audio, and checksum validation |
 | `scripts/benchmark-profile.sh` | Cold start, warm requests, identity, OOM, memory, and swap capture |
 | `scripts/compare-quality.sh` | Frame-aligned SSIM/PSNR, audio comparison, and inspection frames |

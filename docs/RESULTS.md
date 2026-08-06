@@ -288,9 +288,79 @@ Humming is therefore not selected by default. It remains a deterministic
 eager/no-cache alternative for operators who want to reproduce the isolated
 comparison; the launcher rejects Humming with compile or Cache-DiT.
 
+## Historical eager-only kernel-cache and readiness validation
+
+On 2026-08-06, the older Humming/eager/no-cache profile was started once with
+an empty dedicated kernel cache and recreated once with the populated cache.
+Both starts remained unhealthy until a two-step text-only warmup at the
+production 768x448x56 shape completed.
+
+| Measurement | Empty cache | Populated cache |
+|---|---:|---:|
+| Model loading | 494.114 s | 479.222 s |
+| Production-shape warmup | 43.624 s | 37.871 s |
+| Container start to healthy | 9m59s | 9m29s |
+| Cache after readiness | 23.4 MB, 682 files | 22,821,931 bytes, 690 files |
+
+The populated-cache warmup was 5.753 seconds (13.2%) faster. The cache held
+Humming, Triton, and TorchInductor artifacts and remained exactly 22,821,931
+bytes / 690 files across the second container recreation, demonstrating reuse
+without new compilation. Checkpoint loading still dominated total startup and
+is not expected to benefit from these kernel caches.
+
+After the empty-cache start, the full 20-step seed-42 request was rendered
+twice by `make acceptance`:
+
+| Measurement | First | Repeat |
+|---|---:|---:|
+| HTTP wall time | 118.691 s | 118.494 s |
+| Full FFmpeg decode | Passed | Passed |
+| Video | 56 frames, H.264, 768x448, 24 fps | Same |
+| Audio | AAC-LC stereo, 32 kHz | Same |
+
+Every decoded video frame was byte-identical. Both decoded audio channels
+compared at infinite PSNR, and no kernel-fallback message appeared during the
+acceptance window.
+
+The first full request immediately after the populated-cache restart completed
+in 120.794 seconds with HTTP 200 and a successful full media decode. It stayed
+within the established 118--121 second eager/Humming range, so the first user
+request no longer carried that profile's earlier Humming JIT penalty. These
+startup figures are not performance evidence for the newer default
+regional-compile/CUTLASS profile.
+
+## Current default review-candidate revalidation
+
+On 2026-08-06, the cumulative branch was rebased onto repository main at
+`7bd148f` and rebuilt with its documented defaults: cuDNN attention, regional
+compile, no cache, CUTLASS FP8, and production-shape startup warmup. This is a
+direct revalidation of the review candidate, separate from the historical
+eager/Humming measurements above.
+
+Model loading used 89.1659 GiB and took 482.705 seconds. The two-step
+768x448x56 warmup then completed in 33.738 seconds, and application readiness
+arrived about 9 minutes 2 seconds after container start. The persistent cache
+volume was already populated from earlier validation, so this is a
+populated-cache observation rather than an empty-cache benchmark.
+
+`make acceptance` then rendered the fixed 20-step seed-42 request twice:
+
+| Measurement | First | Repeat |
+|---|---:|---:|
+| HTTP wall time | 115.204 s | 113.295 s |
+| Full FFmpeg decode | Passed | Passed |
+| Video | 56 frames, H.264, 768x448, 24 fps | Same |
+| Audio | AAC-LC stereo, 32 kHz | Same |
+
+The 114.250-second client mean is consistent with the prior 111.373-second
+full-compute reconfirmation under ordinary run variance. Every decoded video
+frame was byte-identical, both decoded audio channels compared at infinite
+PSNR, and no cuDNN or linear-kernel fallback was logged during the acceptance
+window. The container remained healthy with zero OOM kills and zero restarts.
+
 ## Patch tests
 
-Sixteen focused tests passed inside the exact built image, covering:
+Eighteen focused tests passed inside the exact built image, covering:
 
 1. grouped QKV layout normalization;
 2. native parameter-loader contract preservation;
@@ -300,12 +370,14 @@ Sixteen focused tests passed inside the exact built image, covering:
 6. packed attention-mask construction and propagation;
 7. static-conditioning branch wiring and raw-input fallback;
 8. pipeline-level conditioning preparation;
-9. fused SwiGLU selection; and
+9. fused SwiGLU selection;
 10. direct modality embedding assignment;
 11. guarded GB10 bandwidth discovery and unknown-device failure;
 12. canonical Humming online-FP8 weight restoration and validation;
-13. preservation of dynamic per-token Humming activation scaling; and
-14. Humming-only batch-invariant scheduler configuration.
+13. preservation of dynamic per-token Humming activation scaling;
+14. Humming-only batch-invariant scheduler configuration;
+15. the MiniMax H3 production warmup shape and text-only conditioning; and
+16. shared-engine model-specific warmup settings and completion logging.
 
 The remaining cases cover rejection paths within those categories. Launcher
 contract tests additionally verify that unrecognized attention and linear

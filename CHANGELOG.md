@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added a fail-closed two-step 768x448x56 startup warmup for the FL2VA
+  text-to-video path and a health check that remains closed until it passes.
+- Persisted Humming, Triton, and TorchInductor kernel caches across container
+  recreation.
+- Added a fixed-seed acceptance command that compares every decoded video
+  frame, stereo audio PSNR, media validity, timings, and kernel-fallback logs.
+- Expanded the pinned-image suite to 18 regression tests.
+
 ## 1.1.0 - 2026-08-04
 
 - Added independently measured cuDNN-attention and regional-compile controls;

@@ -13,6 +13,11 @@ RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages/vllm_omni/diffusion/models/minimax_h3 \
       < /tmp/minimax_h3_static_conditioning.patch \
     && rm /tmp/minimax_h3_static_conditioning.patch
+COPY --chmod=0644 patches/minimax_h3_production_warmup.patch /tmp/minimax_h3_production_warmup.patch
+RUN patch --batch --forward -p0 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_production_warmup.patch \
+    && rm /tmp/minimax_h3_production_warmup.patch
 COPY --chmod=0644 patches/humming_gb10_bandwidth.patch /tmp/humming_gb10_bandwidth.patch
 RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages \
