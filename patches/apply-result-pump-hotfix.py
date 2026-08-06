@@ -103,6 +103,12 @@ PUMP_WRAPPER = '''    def _h3_pump_forever(self) -> None:
                 return  # clean exit: the loop observed _pump_stop / _is_failed
             except Exception:
                 logger.exception("Result pump raised; restarting dispatch loop")
+                # Back off on the stop event rather than spinning: a failure
+                # that reproduces immediately would otherwise pin a core and
+                # flood the log, and waiting here still observes shutdown at
+                # once instead of sleeping through it.
+                if self._pump_stop.wait(1.0):
+                    return
 
     def _result_pump(self) -> None:'''
 
@@ -211,7 +217,35 @@ TIMEOUT_BLOCK = '''import os as _h3_os
 # milliseconds. The upstream 30 s was tight enough that a slow denoise step
 # (48 s/step at 50 steps) tripped it, cancelling the output future mid-flight.
 # Override with H3_ASYNC_OUTPUT_TIMEOUT (seconds).
-_ASYNC_OUTPUT_TIMEOUT = float(_h3_os.environ.get("H3_ASYNC_OUTPUT_TIMEOUT", "900"))'''
+_H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT = 900.0
+
+
+def _h3_async_output_timeout() -> float:
+    """Read the override, falling back rather than failing to import.
+
+    This runs at import time, so raising here would take the whole server
+    down at startup over a typo in an environment variable — and the
+    traceback would point at an import, not at the setting that caused it.
+    """
+    raw = _h3_os.environ.get("H3_ASYNC_OUTPUT_TIMEOUT")
+    if raw is None or raw.strip() == "":
+        return _H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid H3_ASYNC_OUTPUT_TIMEOUT=%r; using %.1f s",
+            raw, _H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT)
+        return _H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT
+    if value <= 0:
+        logger.warning(
+            "Ignoring non-positive H3_ASYNC_OUTPUT_TIMEOUT=%r; using %.1f s",
+            raw, _H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT)
+        return _H3_DEFAULT_ASYNC_OUTPUT_TIMEOUT
+    return value
+
+
+_ASYNC_OUTPUT_TIMEOUT = _h3_async_output_timeout()'''
 
 
 def patch_engine(text: str) -> str:
