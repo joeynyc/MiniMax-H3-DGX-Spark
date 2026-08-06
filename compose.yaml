@@ -18,6 +18,10 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       VLLM_WORKER_MULTIPROC_METHOD: spawn
       VLLM_OMNI_VIDEO_SYNC_TIMEOUT: ${H3_VIDEO_SYNC_TIMEOUT:-7200}
+      # Bounds only the background D2H/SHM copy of a finished step (normally
+      # milliseconds). Upstream's 30 s was tripped by 48 s/step runs, which
+      # cancelled the output future mid-flight. See patches/apply-result-pump-hotfix.py
+      H3_ASYNC_OUTPUT_TIMEOUT: ${H3_ASYNC_OUTPUT_TIMEOUT:-900}
       FLASHINFER_DISABLE_VERSION_CHECK: "1"
       HF_HOME: /root/.cache/huggingface
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
