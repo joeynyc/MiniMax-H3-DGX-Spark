@@ -59,7 +59,7 @@ for value in "${AUDIO_PSNR_VALUES[@]}"; do
 done
 
 SERVER_LOG="$TMP_DIR/server.log"
-docker logs --since "$STARTED_AT" minimax-h3-fl2va >"$SERVER_LOG" 2>&1
+docker logs --since "$STARTED_AT" minimax-h3-rig >"$SERVER_LOG" 2>&1
 if rg -qi 'No available kernel|falling back|fallback kernel' "$SERVER_LOG"; then
   echo "server logged a kernel fallback during fixed-seed acceptance" >&2
   rg -ni 'No available kernel|falling back|fallback kernel' "$SERVER_LOG" >&2

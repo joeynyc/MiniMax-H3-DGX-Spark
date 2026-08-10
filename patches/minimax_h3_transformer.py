@@ -64,6 +64,8 @@ class MiniMaxH3DiTArchConfig:
     timestep_input_dim: int = 256
     time_embed_hidden_size: int = 5376
     time_embed_dim: int = 2688
+    adaln_curve_grid: int | None = None
+    adaln_curve_base_dim: int | None = None
     adaln_out_features: int = 18 * 5376
     final_adaln_out_features: int = 2 * 5376
     rope_inv_freq_len: int = 16
@@ -80,6 +82,18 @@ class MiniMaxH3DiTArchConfig:
         arch = cls(**values)
         if len(arch.patch_size) != 3:
             raise ValueError(f"patch_size must contain three values, got {arch.patch_size!r}")
+        if arch.adaln_curve_grid is None:
+            if arch.adaln_curve_base_dim is not None:
+                raise ValueError(
+                    "adaln_curve_base_dim requires an AdaLN curve checkpoint"
+                )
+        else:
+            if arch.adaln_curve_base_dim is None:
+                arch.adaln_curve_base_dim = arch.time_embed_dim
+            if not 1 <= arch.adaln_curve_base_dim <= arch.time_embed_dim:
+                raise ValueError(
+                    "adaln_curve_base_dim must be between 1 and time_embed_dim"
+                )
         return arch
 
 
@@ -125,7 +139,7 @@ def _bind_native_cuda_fp8_activation_quantizers(root: nn.Module) -> int:
     return bound
 
 
-MINIMAX_H3_FP32_BUFFER_NAMES = frozenset({"rope.inv_freq"})
+MINIMAX_H3_FP32_BUFFER_NAMES = frozenset({"rope.inv_freq", "adaln_t_table"})
 
 # AdaLN modality count: token tags carry -1 for padding and 0/1/2 for
 # video/text/audio tokens (padding is clamped to 0 before the embedding
@@ -243,6 +257,24 @@ def _prepare_h3_checkpoint_weight(
             "MiniMax H3 fc1 checkpoint rows must split evenly into "
             f"gate/up matrices, got {tuple(weight.shape)}"
         )
+    base_dimensions = arch.adaln_curve_base_dim
+    if (
+        arch.adaln_curve_grid is not None
+        and base_dimensions is not None
+        and base_dimensions < arch.time_embed_dim
+        and weight.ndim == 2
+        and weight.shape[1] == base_dimensions
+        and (
+            name == "adaln_t_table"
+            or name.endswith(".adaln_proj.linear.weight")
+        )
+    ):
+        extension = torch.zeros(
+            (*weight.shape[:-1], arch.time_embed_dim - base_dimensions),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        return torch.cat((weight, extension), dim=-1)
     return weight
 
 
@@ -280,6 +312,27 @@ def _modulate_gate(
 ) -> torch.Tensor:
     # Apply the per-index gated residual: x + gate[idx] * other.
     return (x + gate.index_select(0, indices) * other).to(dtype)
+
+
+def _interpolate_h3_adaln_curve(
+    table: torch.Tensor,
+    timesteps: torch.Tensor,
+) -> torch.Tensor:
+    """Interpolate compact AdaLN coordinates for normalized H3 timesteps."""
+    if table.dim() != 2 or table.shape[0] < 2:
+        raise ValueError(
+            "MiniMax H3 AdaLN curve table must be [grid >= 2, dimensions], "
+            f"got {tuple(table.shape)}."
+        )
+    pos = timesteps.to(device=table.device, dtype=_FP32_DTYPE).clamp(0.0, 1.0)
+    pos = pos * (table.shape[0] - 1)
+    lower = pos.floor().to(torch.long).clamp(max=table.shape[0] - 2)
+    fraction = (pos - lower).unsqueeze(1)
+    return torch.lerp(
+        table.index_select(0, lower),
+        table.index_select(0, lower + 1),
+        fraction,
+    )
 
 
 class MiniMaxH3Rope(nn.Module):
@@ -584,21 +637,26 @@ class MiniMaxH3AdalnProj(nn.Module):
         self.expand_ratio = expand_ratio
         self.modality_num = modality_num
         self.hidden_size = arch.hidden_size
+        self.apply_silu = arch.adaln_curve_grid is None
+        params_dtype = _BF16_DTYPE if self.apply_silu else _FP32_DTYPE
         self.linear = ColumnParallelLinear(
             arch.time_embed_dim,
             out_features,
             bias=True,
             gather_output=True,
-            params_dtype=_BF16_DTYPE,
-            quant_config=quant_config,
+            params_dtype=params_dtype,
+            # Curve weights are tiny and intentionally evaluated in fp32.
+            quant_config=quant_config if self.apply_silu else None,
         )
 
     def forward(self, t_emb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """t_emb: [M, t_dim] -> expand_ratio tensors of [M*modality_num, H]."""
-        x = nn.functional.silu(t_emb)
-        # Online FP8 replaces ``weight`` with an FP8 parameter after loading;
-        # activations must remain BF16 and be quantized by the linear kernel.
-        x, _ = self.linear(x.to(_BF16_DTYPE))
+        x = nn.functional.silu(t_emb) if self.apply_silu else t_emb
+        # Online FP8 replaces full-checkpoint ``weight`` with an FP8 parameter
+        # after loading. Curve-form projections stay fp32 and skip SiLU because
+        # their coordinates already describe the time-embedding curve.
+        input_dtype = _BF16_DTYPE if self.apply_silu else _FP32_DTYPE
+        x, _ = self.linear(x.to(input_dtype))
         m = x.shape[0]
         x = x.view(m * self.modality_num, self.expand_ratio * self.hidden_size)
         return tuple(x.chunk(self.expand_ratio, dim=-1))
@@ -860,7 +918,17 @@ class MiniMaxH3DiTModel(nn.Module):
         },
         "sp_gather": SequenceParallelOutput(gather_dim=0, expected_dims=2),
     }
-    packed_modules_mapping = {}
+    # The native H3 checkpoint stores fused QKV weights, while Diffusers LoRA
+    # adapters commonly target logical to_q/to_k/to_v modules. Expose those
+    # logical names so vLLM can assemble their deltas into qkv_proj.
+    stacked_params_mapping = [
+        (".attn.qkv_proj", ".attn.q_proj", "q"),
+        (".attn.qkv_proj", ".attn.k_proj", "k"),
+        (".attn.qkv_proj", ".attn.v_proj", "v"),
+    ]
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     def _validate_tp_config(self, *, arch: MiniMaxH3DiTArchConfig, tp_size: int) -> None:
         if tp_size < 1:
@@ -939,7 +1007,23 @@ class MiniMaxH3DiTModel(nn.Module):
             params_dtype=_BF16_DTYPE,
             quant_config=quant_config,
         )
-        self.time_embedder = MiniMaxH3TimeEmbedder(arch, quant_config)
+        if arch.adaln_curve_grid is None:
+            self.time_embedder = MiniMaxH3TimeEmbedder(arch, quant_config)
+        else:
+            if arch.adaln_curve_grid < 2:
+                raise ValueError(
+                    "adaln_curve_grid must contain at least two rows, got "
+                    f"{arch.adaln_curve_grid}."
+                )
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(
+                    arch.adaln_curve_grid,
+                    arch.time_embed_dim,
+                    dtype=_FP32_DTYPE,
+                ),
+                persistent=True,
+            )
         self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len)
         self.token_refiner = MiniMaxH3TokenRefiner(arch, quant_config)
         self.blocks = nn.ModuleList([MiniMaxH3DiTBlock(arch, quant_config) for _ in range(arch.num_layers)])
@@ -969,6 +1053,12 @@ class MiniMaxH3DiTModel(nn.Module):
         for name, buffer in self.named_buffers():
             if name in MINIMAX_H3_FP32_BUFFER_NAMES and buffer.dtype != _FP32_DTYPE:
                 raise ValueError(f"{name} must stay fp32 after load, got {buffer.dtype}.")
+        if self.arch.adaln_curve_grid is not None:
+            for name, param in self.named_parameters():
+                if ".adaln_proj.linear." in name and param.dtype != _FP32_DTYPE:
+                    raise ValueError(
+                        f"curve-form {name} must stay fp32 after load, got {param.dtype}."
+                    )
 
     def load_weights(
         self,
@@ -982,6 +1072,17 @@ class MiniMaxH3DiTModel(nn.Module):
             param = params.get(name)
             if param is None:
                 logger.warning("Skipping MiniMax H3 weight not present in model: %s", name)
+                continue
+            if (
+                name == "adaln_t_table"
+                and name in loaded
+                and self.arch.adaln_curve_base_dim is not None
+                and self.arch.adaln_curve_base_dim < self.arch.time_embed_dim
+                and loaded_weight.ndim == 2
+                and loaded_weight.shape[1] == self.arch.adaln_curve_base_dim
+            ):
+                # A curve-extension overlay may be enumerated before the base
+                # shard. Never let the smaller base table erase its columns.
                 continue
             loaded_weight = _prepare_h3_checkpoint_weight(
                 name,
@@ -1154,7 +1255,13 @@ class MiniMaxH3DiTModel(nn.Module):
         embeddings.index_copy_(0, img_pos, video_embed.to(_BF16_DTYPE)[: img_pos.shape[0]])
         embeddings.index_copy_(0, audio_pos, audio_embed.to(_BF16_DTYPE)[: audio_pos.shape[0]])
 
-        t_emb = self.time_embedder(unique_timesteps)
+        if self.arch.adaln_curve_grid is None:
+            t_emb = self.time_embedder(unique_timesteps)
+        else:
+            t_emb = _interpolate_h3_adaln_curve(
+                self.adaln_t_table,
+                unique_timesteps,
+            )
         return embeddings, t_emb
 
     def forward(

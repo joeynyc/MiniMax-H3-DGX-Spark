@@ -39,11 +39,13 @@ if grep -q ' apsnr ' <<<"$ffmpeg_filters"; then
   ffmpeg -v info -i "$REFERENCE" -i "$CANDIDATE" \
     -filter_complex '[0:a]aresample=32000:first_pts=0[a0];[1:a]aresample=32000:first_pts=0[a1];[a0][a1]apsnr' \
     -f null - 2>"$OUTPUT_DIR/audio-psnr.log"
-else
-  ffmpeg -v info -i "$REFERENCE" -i "$CANDIDATE" \
-    -filter_complex '[0:a]aresample=32000:first_pts=0[a0];[1:a]aresample=32000:first_pts=0[a1];[a0][a1]amix=inputs=2:weights=1 -1:normalize=0,astats=metadata=1:reset=0' \
-    -f null - 2>"$OUTPUT_DIR/audio-difference.log"
 fi
+# Always measure the residual waveform as well. Some FFmpeg builds have produced
+# implausible apsnr summaries for generated stereo AAC even when the decoded
+# waveforms and loudness differ materially.
+ffmpeg -v info -i "$REFERENCE" -i "$CANDIDATE" \
+  -filter_complex '[0:a]aresample=32000:first_pts=0[a0];[1:a]aresample=32000:first_pts=0[a1];[a0][a1]amix=inputs=2:weights=1 -1:normalize=0,astats=metadata=1:reset=0' \
+  -f null - 2>"$OUTPUT_DIR/audio-difference.log"
 
-grep -E 'SSIM|PSNR' "$OUTPUT_DIR"/*.log || true
+grep -E 'SSIM|PSNR|RMS level dB|Peak level dB' "$OUTPUT_DIR"/*.log || true
 echo "quality comparison completed: $OUTPUT_DIR"

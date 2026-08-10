@@ -1,7 +1,8 @@
 # Measured one-Spark results
 
-These results describe MiniMax H3 FL2VA on one NVIDIA DGX Spark. They are not
-vendor benchmarks, an upstream support guarantee, or a cross-machine claim.
+These results describe MiniMax H3 FL2VA and the specifically identified
+Ref2VA experiments on one NVIDIA DGX Spark. They are not vendor benchmarks,
+an upstream support guarantee, or a cross-machine claim.
 Generated artifacts, frames, request logs, and model weights are not included.
 
 ## Runtime identity
@@ -212,6 +213,69 @@ warm runs within each profile produced matching SHA-256 hashes.
 
 The generated artifacts are not distributed in this public repository. See
 [the model-license notice](../MODEL-LICENSE.md).
+
+## Ref2VA reference-image pixel budget
+
+On 2026-08-08, the Ref2VA image built from this repository was tested with one
+matched image-only request after startup warmup. The source was a deliberately
+difficult 1672x941 composite character image containing two small faces,
+distinct hair colors, elongated joined anatomy, lace clothing, microphones,
+a mixing surface, and a detailed studio background. The prompt, 768x448 output,
+20 steps, four-second duration, flow shifts, and seed 42 remained fixed.
+
+| Reference policy | Encoded reference | Approx. reference latent positions | Logged Qwen presentation tokens | Client | Engine | Mean step |
+|---|---:|---:|---:|---:|---:|---:|
+| Legacy 2048 short edge | 3648x2048 | 29,184 | 7,190 | 636.913 s | 632.686 s | 31.634 s |
+| 200% output pixel area | 1120x608 | 2,660 | 830 | 268.877 s | 266.530 s | 13.327 s |
+| 100% output pixel area | 768x448 | 1,344 | 486 | **251.181 s** | **248.878 s** | **12.444 s** |
+
+All three requests returned HTTP 200, passed a complete FFmpeg decode, and
+contained 107 H.264 frames at 24 fps plus AAC-LC stereo audio at 32 kHz. The
+100% policy reduced client time by 60.56% (2.54x generation rate) versus the
+legacy policy. The 200% policy reduced it by 57.78% (2.37x), while costing only
+17.696 seconds more than 100%.
+
+Start, midpoint, end, and one-frame-per-second contact sheets were inspected.
+Both budgeted outputs retained the two faces, impossible neck geometry, hair
+colors, clothing, microphones, console, lighting, and background without an
+obvious systematic fidelity loss relative to legacy. Gesture and eye choices
+differed, as expected when a conditioning representation changes. This is one
+stress fixture rather than a universal quality proof. The product integration
+therefore selects 100% for ordinary full-frame references and offers 200% for
+many small subjects or unusually fine detail; the low-level patch preserves
+legacy behavior when the request field is omitted.
+
+The reproducible request harness is
+[`scripts/benchmark-ref2va-pixel-budget.sh`](../scripts/benchmark-ref2va-pixel-budget.sh).
+Generated media and the private source fixture are not distributed.
+
+## SM121 Sol-Attn feasibility check
+
+Sol-Attn was evaluated separately against the rig's actual cuDNN full-compute
+backend, rather than treating comparisons against SageAttention as transferable.
+The source checkout was `Saganaki22/ComfyUI-sol-attn` commit
+`90467f1c633ce53af7d77e4a1cc243b5001d89b0`, with H3-shaped BF16 tensors
+(`B=1`, `H=56`, `D=128`), seed 42, three warmups, and the median of ten timed
+iterations on PyTorch 2.11.0+cu130.
+
+| Tokens | cuDNN | Sol BF16 | BF16 speedup | Sol int8 Q/K | int8 speedup | Sol exact rel. L2 | Sparse BF16 rel. L2 | Sparse int8 rel. L2 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8,192 | 20.538 ms | 10.000 ms | 2.05x | 9.198 ms | 2.23x | 0.000168 | 0.747955 | 0.747994 |
+| 16,384 | 82.115 ms | 35.113 ms | 2.34x | 30.266 ms | 2.71x | 0.000199 | 0.747746 | 0.747785 |
+| 32,768 | 330.062 ms | 129.007 ms | 2.56x | 110.033 ms | 3.00x | 0.000231 | 0.754727 | 0.754765 |
+
+The all-exact Sol setting (`tau=-100`) closely matched cuDNN, validating the
+SM121 kernel path and the comparison harness. The default sparse setting
+(`tau=1`) was materially approximate on the random fixture. Relative L2 on
+random activations is not a video-quality score, but a difference this large
+does not meet the project's behavior-preserving adoption bar. No Sol-Attn code
+was vendored and it is not a production default. A future visual branch may
+evaluate scheduled sparsity, dense early/late steps, and exact conditioning
+blocks before any product integration.
+
+The reproducible microbenchmark is
+[`scripts/benchmark-sol-attn.py`](../scripts/benchmark-sol-attn.py); it requires
+an explicit external Sol-Attn checkout.
 
 ## Cumulative optimization A/B
 

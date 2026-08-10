@@ -7,7 +7,7 @@ services:
       args:
         BASE_IMAGE: vllm/vllm-omni:minimax-h3@sha256:e930db8e225162d01e17a49dddc43fd0e844208908d8356a028e5c4e7357696e
     image: minimax-h3-dgx-spark:sm121-fp8
-    container_name: minimax-h3-fl2va
+    container_name: minimax-h3-rig
     restart: "no"
     network_mode: host
     ipc: host
@@ -34,6 +34,7 @@ services:
       H3_CACHE_CONFIG: ${H3_CACHE_CONFIG:-}
       H3_LINEAR_BACKEND: ${H3_LINEAR_BACKEND:-CUTLASS}
       H3_STARTUP_WARMUP: ${H3_STARTUP_WARMUP:-true}
+      H3_RIG_MODE: ${H3_RIG_MODE:-fl2va}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://$${H3_BIND_HOST}:$${H3_API_PORT}/health >/dev/null"]
       interval: 10s
@@ -41,7 +42,8 @@ services:
       retries: 6
       start_period: 15m
     volumes:
-      - ${MINIMAX_H3_MODEL_DIR:?Set MINIMAX_H3_MODEL_DIR in .env}:/models/MiniMax-H3/FL2VA:ro
+      - ${MINIMAX_H3_MODEL_ROOT:?Set MINIMAX_H3_MODEL_ROOT in .env}:/models/MiniMax-H3:ro
+      - ${MINIMAX_H3_LORA_ROOT:?Set MINIMAX_H3_LORA_ROOT in .env}:/models/loras:ro
       - ${HF_CACHE_DIR:?Set HF_CACHE_DIR in .env}:/root/.cache/huggingface
       - h3-kernel-cache:/root/.cache/minimax-h3-kernels
       - ./output:/output

@@ -5,8 +5,8 @@
 [![Architecture: ARM64](https://img.shields.io/badge/architecture-ARM64-informational)](#verified-configuration)
 [![GPU: GB10 SM121](https://img.shields.io/badge/GPU-GB10%20SM121-76B900)](#verified-configuration)
 
-A measured compatibility recipe for serving MiniMax H3 FL2VA on a single
-NVIDIA DGX Spark with vLLM-Omni and online FP8.
+A measured compatibility recipe for serving curve-compressed MiniMax H3 FL2VA
+or Ref2VA on a single NVIDIA DGX Spark with vLLM-Omni and online FP8.
 
 I built this after the obvious single-Spark paths failed in different ways:
 BF16 ran out of practical unified-memory headroom, INT8 reached an unsupported
@@ -29,18 +29,21 @@ inspectable, and repeatable.
 |---|---:|
 | Hardware | 1x DGX Spark, GB10, ARM64, SM121, 128 GB-class unified memory |
 | Runtime | Pinned `vllm/vllm-omni:minimax-h3` ARM64 image |
-| Checkpoint | MiniMax H3 FL2VA, approximately 135 GiB on disk |
+| Production checkpoint | MiniMax H3 AdaLN curve FL2VA or Ref2VA; 37.46 GiB transformer files |
+| Offline comparison source | Full FL2VA/Ref2VA retained as `*-Full`, never selected by production |
 | Quantization | Online dynamic FP8; CUTLASS default, deterministic Humming eager alternative |
 | Full-compute default | cuDNN attention + regional compile, no cache |
 | Optional balanced profile | cuDNN + regional compile + Cache-DiT at `0.10` |
-| Model load | 89.1659 GiB; 482–543 seconds across cold starts |
+| Curve Ref2VA model load | 77.1211 GiB; about 28 GiB remained available during a 20-step render |
+| Auxiliary-model proof | Ref2VA render and 5.6 GB GPU-resident official `qwen3.5:9b` visual inference both completed; about 22 GiB remained available |
+| Historical full-model load | 89.1659 GiB; retained as comparison evidence only |
 | Baseline warmed request | 152.911 seconds client mean (sweep, two runs) |
 | Full-compute warmed request | 111.373 seconds client mean (final image, two runs) |
 | Review-candidate warmed request | 114.250 seconds client mean (two runs) |
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 18 passed in the exact pinned image |
+| Regression tests | 34 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request
@@ -52,9 +55,9 @@ published because of the model-license restrictions above.
 
 ```mermaid
 flowchart LR
-    A[FL2VA checkpoint] --> B[Pinned vLLM-Omni image]
-    B --> C[SM121 H3 compatibility patch]
-    C --> D[Online dynamic FP8]
+    A[Full checkpoint + curve tensors] --> B[Canonical curve checkpoint]
+    B --> C[Pinned vLLM-Omni image]
+    C --> D[SM121 compatibility + online FP8]
     D --> E[cuDNN attention + regional compile]
     E --> F[OpenAI-compatible video API]
     F --> G[HTTP and FFmpeg verifier]
@@ -68,6 +71,13 @@ The patch makes four focused corrections:
    SM121 instead of the failing compiled wrapper.
 4. Keeps AdaLN activations in BF16 after its linear weights become FP8.
 
+Production additionally uses the checkpoint's compact AdaLN curve form. This
+removes neither transformer blocks nor general model capacity; it replaces the
+large timestep-conditioned AdaLN projections. The launcher fails closed if a
+canonical partition is not curve-compressed, so a mode change cannot silently
+restore the memory-monopolizing full checkpoint. See
+[the measured curve decision](docs/CURVE_CHECKPOINT_EXPERIMENT.md).
+
 FlashAttention-4's CuTe variable-length kernel also failed for this packed H3
 shape on SM121. The measured release supports SDPA and cuDNN attention; cuDNN
 with regional compile is the full-compute default. See
@@ -79,6 +89,11 @@ prompt/RoPE conditioning, and direct modality embedding scatters. These are
 kept separate from the SM121 compatibility rationale and are covered by the
 same pinned-image regression suite.
 
+The pinned image predates MiniMax H3's official Ref2VA input-matrix update, so
+the image backports vLLM-Omni commit `ae7bee0c` (PR #5752). Ref2VA consequently
+accepts image-only and video-only references as well as mixed visual/audio
+references, subject to the upstream count limits; audio is not mandatory.
+
 The image also repairs three Humming integration gaps: GB10 bandwidth
 discovery, online-FP8 weight layout, and dynamic activation-schema
 propagation. Its deterministic scheduler passed repeated fixed-seed eager
@@ -88,11 +103,12 @@ faster in the measured full-compute comparison. Select Humming only with
 `H3_EXECUTION_MODE=eager` and `H3_CACHE_BACKEND=none`; exact evidence is in
 [docs/RESULTS.md](docs/RESULTS.md).
 
-Startup now performs a two-step warmup at the real 768x448x56 production shape
-before the health check can pass. Linear, Triton, and TorchInductor artifacts
-are stored in a dedicated Compose volume, so container recreation preserves
-compiled kernels. Set `H3_STARTUP_WARMUP=false` only as an explicit diagnostic
-rollback; it restores lazy first-request compilation and weakens readiness.
+Startup now performs a two-step warmup at 768x448 with a valid four-second
+request before the health check can pass. Linear, Triton, and TorchInductor
+artifacts are stored in a dedicated Compose volume, so container recreation
+preserves compiled kernels. Set `H3_STARTUP_WARMUP=false` only as an explicit
+diagnostic rollback; it restores lazy first-request compilation and weakens
+readiness.
 
 ## Quick start
 
@@ -101,7 +117,8 @@ Prerequisites:
 - NVIDIA DGX Spark or equivalent ARM64 GB10 system
 - Docker with Compose and NVIDIA GPU support
 - At least 110 GiB of memory available before launch
-- A complete MiniMax H3 FL2VA checkpoint
+- An authorized full MiniMax H3 FL2VA and/or Ref2VA source checkpoint
+- The matching AdaLN curve checkpoint tensors used by the converter
 - Authorization to use MiniMax H3 in your territory
 - FFmpeg, including `ffmpeg` and `ffprobe` (required by smoke and verification)
 
@@ -109,14 +126,52 @@ Prerequisites:
 git clone https://github.com/joeynyc/MiniMax-H3-DGX-Spark.git
 cd MiniMax-H3-DGX-Spark
 cp .env.example .env
-# Edit .env: checkpoint path, HF cache path, and license acknowledgment.
+docker compose build
+```
+
+### Prepare the canonical checkpoint
+
+The launcher does not serve a full checkpoint. Preserve each authorized full
+source under a `*-Full` name, then build the corresponding canonical curve
+partition. The converter requires PyTorch and Safetensors; the pinned image
+already contains both, so it can be used without changing the host Python
+environment. For FL2VA:
+
+```bash
+MODEL_ROOT=/absolute/path/to/MiniMax-H3
+CURVE_FILE=/absolute/path/to/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+docker run --rm --entrypoint python \
+  -v "$MODEL_ROOT:/models" \
+  -v "$CURVE_FILE:/curve/checkpoint.safetensors:ro" \
+  -v "$PWD/scripts:/scripts:ro" \
+  minimax-h3-dgx-spark:sm121-fp8 \
+  /scripts/prepare-h3-curve-checkpoint.py \
+  --base-model /models/FL2VA-Full \
+  --curve-checkpoint /curve/checkpoint.safetensors \
+  --output-model /models/FL2VA
+```
+
+For Ref2VA, use `Ref2VA-Full`, `Ref2VA`, and its matching Ref2VA curve file.
+The converter refuses to overwrite an existing output. The full source stays
+unchanged and supplies the shared encoders and VAEs through relative links, so
+keep the `*-Full` directory beside the canonical partition.
+
+```bash
+# Edit .env: model root, rig mode, HF cache path, and license acknowledgment.
 # The secure default listens only on 127.0.0.1.
 
 make preflight
-make build
 make up
 make logs
 ```
+
+Set `H3_RIG_MODE=fl2va` for `MiniMax-H3/FL2VA` or `H3_RIG_MODE=ref2va`
+for `MiniMax-H3/Ref2VA`. The model root is mounted once and the launcher selects
+the requested task partition; both canonical directories must be
+curve-compressed. Switching modes requires recreating the single-model service.
+The `*-Full` sources are not selectable through the launcher.
+`MINIMAX_H3_LORA_ROOT` is a read-only mount for request-scoped PEFT adapters and
+does not activate any adapter by itself.
 
 Allow up to 15 minutes for a cold start; the current default review candidate
 reached application readiness in about nine minutes on the measured machine.
@@ -172,17 +227,25 @@ to the public internet.
 | `scripts/acceptance-fixed-seed.sh` | Two-run decoded-frame, audio, and kernel-fallback acceptance gate |
 | `scripts/verify-output.sh` | Streams, full decode, audio, and checksum validation |
 | `scripts/benchmark-profile.sh` | Cold start, warm requests, identity, OOM, memory, and swap capture |
+| `scripts/benchmark-ref2va-pixel-budget.sh` | Matched legacy/200%/100% Ref2VA reference-conditioning comparison |
+| `scripts/benchmark-sol-attn.py` | External Sol-Attn checkout versus the rig's cuDNN backend on SM121 |
+| `scripts/prepare-h3-curve-checkpoint.py` | Builds the required canonical AdaLN curve checkpoint without modifying its sources |
+| `scripts/prepare-h3-curve-tutu-adapter.py` | Derives a local-only Tutu residual adapter and minimal curve-extension overlay for qualification |
 | `scripts/compare-quality.sh` | Frame-aligned SSIM/PSNR, audio comparison, and inspection frames |
 | `scripts/runtime-provenance.sh` | Exact image ID, architecture, and runtime-version check |
 | `tests/` | Focused loader, FP8, AdaLN, packaging, profile, and optimization regressions |
 | `docs/RESULTS.md` | Exact measured acceptance evidence |
+| `docs/CURVE_CHECKPOINT_EXPERIMENT.md` | AdaLN curve A/B, production decision, and Ref2VA acceptance evidence |
 | `docs/REPRODUCIBILITY.md` | Profiles, workload, warm-up, and quality-comparison method |
 | `docs/TROUBLESHOOTING.md` | Symptom-to-cause guidance from the bring-up |
 
 ## Scope and honesty
 
-- This is a single-Spark FL2VA path, not a multi-node H3 implementation.
-- It uses online FP8; it is not the BF16 quality baseline.
+- This is a single-Spark H3 path, not a multi-node implementation. Most
+  published profiles are FL2VA-specific; the explicitly labeled Ref2VA pixel
+  budget experiment is one stress fixture, not a general quality guarantee.
+- It uses an AdaLN curve checkpoint with online FP8; the retained full
+  checkpoint is an offline comparison source, not the production fallback.
 - The pinned image warns that its bundled vLLM and vLLM-Omni versions are not
   aligned. The recorded path passed, but that warning is not suppressed.
 - No model weights, Hugging Face credentials, private endpoints, or generated
@@ -201,6 +264,7 @@ to the public internet.
 - [vLLM-Omni](https://github.com/vllm-project/vllm-omni)
 - [Upstream H3 recipe](https://github.com/vllm-project/vllm-omni/blob/main/recipes/MiniMaxAI/MiniMax-H3.md)
 - [H3 support pull request](https://github.com/vllm-project/vllm-omni/pull/5691)
+- [Official H3 input-matrix update](https://github.com/vllm-project/vllm-omni/pull/5752)
 - Upstream optimization pull requests:
   [mask reuse](https://github.com/vllm-project/vllm-omni/pull/5817),
   [fused SwiGLU](https://github.com/vllm-project/vllm-omni/pull/5818),

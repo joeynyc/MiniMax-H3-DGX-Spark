@@ -45,6 +45,34 @@ the weight remains BF16, but online quantization replaces it with an FP8
 parameter. The corrected path explicitly keeps the AdaLN activation BF16 and
 lets the linear quantization method handle conversion.
 
+## Production AdaLN curve checkpoint
+
+The production model replaces the original timestep MLP and 51 large AdaLN
+projections with the checkpoint's 1,025-point, 8-dimensional AdaLN curve and
+compact projections. All 50 transformer blocks remain. The runtime performs
+the curve interpolation and compact projections in FP32; checkpoints without
+`adaln_curve_grid` retain the original full AdaLN implementation for offline
+comparison.
+
+`scripts/prepare-h3-curve-checkpoint.py` combines those curve tensors with the
+unchanged tensors from an authorized full checkpoint and links the unchanged
+text encoder, tokenizer, processor, and VAEs. It never writes into the source
+checkpoint and refuses to overwrite an existing output directory.
+
+Production is intentionally stricter than the model implementation. The
+launcher and preflight require valid curve metadata in the canonical `FL2VA`
+or `Ref2VA` partition and fail before model loading otherwise. Full checkpoints
+may be retained as `FL2VA-Full` and `Ref2VA-Full`, but are not selectable
+production profiles. The measured rationale and acceptance evidence are in
+[CURVE_CHECKPOINT_EXPERIMENT.md](CURVE_CHECKPOINT_EXPERIMENT.md).
+
+An experimental Tutu adapter bundle may declare `adaln_curve_base_dim` smaller
+than `time_embed_dim`. The loader pads the base curve table and compact AdaLN
+weights with zero columns, then accepts a full-width overlay table. This keeps
+the unchanged production shards reusable while allowing a checksum-pinned
+adapter-specific curve extension. The ordinary curve path is unchanged when
+the two dimensions are equal.
+
 ## H3 inference optimizations
 
 The image also carries four behavior-preserving H3 changes developed against
@@ -61,6 +89,18 @@ The prompt/RoPE change touches the pinned denoise loop and pipeline as well as
 the transformer. `minimax_h3_static_conditioning.patch` applies those two
 narrow call-site changes during the image build. The transformer retains the
 raw-conditioning fallback for direct callers.
+
+Ref2VA also accepts the optional request field
+`reference_image_pixel_budget_percent`. Values from 50 through 400 resize each
+reference image to approximately that percentage of the selected output pixel
+area while preserving its aspect ratio and H3's 32-pixel alignment. Omitting
+the field retains the upstream 2,048-pixel short-edge behavior. This control is
+opt-in at the API layer. The matched one-Spark experiment in
+[RESULTS.md](RESULTS.md) found 100% visually acceptable on its stress fixture
+and 2.54x the legacy generation rate, so the companion Studio product selects
+100% for ordinary references and reserves 200% for small or numerous details.
+That product policy is deliberately separate from the compatibility patch's
+backward-compatible default.
 
 These changes preserve the Spark-specific native-CUDA FP8 binding. They do not
 enable compilation, replace SDPA, change inference steps, or alter precision.
@@ -100,7 +140,8 @@ added synthetic input conditions for every modality the model advertises.
 That is not a valid FL2VA text-to-video request: a one-entry sigma schedule is
 invalid, and FL2VA rejects the generic audio condition.
 
-The model now declares a two-step 768x448x56 text-only warmup. The shared
+The model now declares a two-step 768x448 warmup using a four-second request
+(96 requested frames before H3's native temporal alignment). The shared
 diffusion engine reads optional model-class warmup attributes, while retaining
 its existing defaults for every other pipeline. Startup fails closed if this
 real generation path fails, and Compose does not report the service healthy

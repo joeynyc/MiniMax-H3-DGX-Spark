@@ -53,7 +53,7 @@ monitor() {
         END {print mt, ma, st, sf}
       ' /proc/meminfo
     )
-    state="$(docker inspect -f '{{.State.Running}},{{.State.OOMKilled}},{{.RestartCount}}' minimax-h3-fl2va 2>/dev/null || echo 'false,false,0')"
+    state="$(docker inspect -f '{{.State.Running}},{{.State.OOMKilled}},{{.RestartCount}}' minimax-h3-rig 2>/dev/null || echo 'false,false,0')"
     printf '%s,%s,%s,%s,%s,%s\n' "$(date +%s)" "$mem_total" "$mem_available" "$swap_total" "$swap_free" "$state" >>"$SAMPLES"
     sleep 1
   done
@@ -70,10 +70,10 @@ docker compose up -d --no-build --force-recreate
 
 ready=0
 for _ in $(seq 1 900); do
-  running="$(docker inspect -f '{{.State.Running}}' minimax-h3-fl2va 2>/dev/null || true)"
-  oom="$(docker inspect -f '{{.State.OOMKilled}}' minimax-h3-fl2va 2>/dev/null || true)"
+  running="$(docker inspect -f '{{.State.Running}}' minimax-h3-rig 2>/dev/null || true)"
+  oom="$(docker inspect -f '{{.State.OOMKilled}}' minimax-h3-rig 2>/dev/null || true)"
   [[ "$oom" != true ]] || {
-    docker logs minimax-h3-fl2va >"$RESULT_DIR/container.log" 2>&1 || true
+    docker logs minimax-h3-rig >"$RESULT_DIR/container.log" 2>&1 || true
     echo "container was OOM-killed during startup" >&2
     exit 1
   }
@@ -88,7 +88,7 @@ for _ in $(seq 1 900); do
   sleep 2
 done
 [[ "$ready" == 1 ]] || {
-  docker logs minimax-h3-fl2va >"$RESULT_DIR/container.log" 2>&1 || true
+  docker logs minimax-h3-rig >"$RESULT_DIR/container.log" 2>&1 || true
   echo "service did not become healthy within 30 minutes" >&2
   exit 1
 }
@@ -118,13 +118,13 @@ printf '%s\n' "$models_json" >"$RESULT_DIR/models.json"
 total_runs=$(( WARM_RUNS + 1 ))
 for run in $(seq 0 $(( total_runs - 1 ))); do
   OUT="$RESULT_DIR/run-$run.mp4" LOG="$RESULT_DIR/run-$run.log" ./scripts/smoke-t2va.sh
-  docker inspect -f 'run='"$run"' running={{.State.Running}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' minimax-h3-fl2va >>"$SUMMARY"
+  docker inspect -f 'run='"$run"' running={{.State.Running}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' minimax-h3-rig >>"$SUMMARY"
   curl -fsS --max-time 5 http://127.0.0.1:"${H3_API_PORT:-8000}"/health >/dev/null
   curl -fsS --max-time 10 http://127.0.0.1:"${H3_API_PORT:-8000}"/v1/models | python3 -c 'import json,sys; data=json.load(sys.stdin); assert [x["id"] for x in data["data"]] == ["/models/MiniMax-H3/FL2VA"]'
   sha256sum "$RESULT_DIR/run-$run.mp4" >>"$SUMMARY"
 done
 
-docker logs --timestamps minimax-h3-fl2va >"$RESULT_DIR/container.log" 2>&1
-docker inspect -f 'final_running={{.State.Running}} final_oom={{.State.OOMKilled}} final_restarts={{.RestartCount}} image_id={{.Image}}' minimax-h3-fl2va >>"$SUMMARY"
+docker logs --timestamps minimax-h3-rig >"$RESULT_DIR/container.log" 2>&1
+docker inspect -f 'final_running={{.State.Running}} final_oom={{.State.OOMKilled}} final_restarts={{.RestartCount}} image_id={{.Image}}' minimax-h3-rig >>"$SUMMARY"
 awk -F, 'NR > 1 {used=$2-$3; swap=$4-$5; if (used>peak_used) peak_used=used; if (swap>peak_swap) peak_swap=swap; if ($3<min_available || min_available==0) min_available=$3} END {printf "peak_used_kib=%d\nmin_available_kib=%d\npeak_swap_used_kib=%d\n", peak_used, min_available, peak_swap}' "$SAMPLES" >>"$SUMMARY"
 echo "benchmark completed: $RESULT_DIR"

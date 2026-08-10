@@ -2,7 +2,7 @@ ARG BASE_IMAGE=vllm/vllm-omni:minimax-h3@sha256:e930db8e225162d01e17a49dddc43fd0
 FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="MiniMax H3 DGX Spark compatibility image" \
-      org.opencontainers.image.description="SM121 online-FP8 compatibility layer for MiniMax H3 FL2VA" \
+      org.opencontainers.image.description="SM121 online-FP8 compatibility layer for MiniMax H3 FL2VA and Ref2VA" \
       org.opencontainers.image.source="https://github.com/joeynyc/MiniMax-H3-DGX-Spark" \
       org.opencontainers.image.licenses="Apache-2.0"
 
@@ -18,6 +18,23 @@ RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages \
       < /tmp/minimax_h3_production_warmup.patch \
     && rm /tmp/minimax_h3_production_warmup.patch
+COPY --chmod=0644 patches/minimax_h3_ref2va_warmup_audio.patch /tmp/minimax_h3_ref2va_warmup_audio.patch
+RUN patch --batch --forward -p0 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_ref2va_warmup_audio.patch \
+    && rm /tmp/minimax_h3_ref2va_warmup_audio.patch
+# Backport vLLM-Omni ae7bee0c (#5752) until the pinned H3 image includes the
+# official Ref2VA mixed-input contract (visual references with optional audio).
+COPY --chmod=0644 patches/minimax_h3_official_input_matrix.patch /tmp/minimax_h3_official_input_matrix.patch
+RUN patch --batch --forward -p1 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_official_input_matrix.patch \
+    && rm /tmp/minimax_h3_official_input_matrix.patch
+COPY --chmod=0644 patches/minimax_h3_reference_pixel_budget.patch /tmp/minimax_h3_reference_pixel_budget.patch
+RUN patch --batch --forward -p1 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_reference_pixel_budget.patch \
+    && rm /tmp/minimax_h3_reference_pixel_budget.patch
 COPY --chmod=0644 patches/humming_gb10_bandwidth.patch /tmp/humming_gb10_bandwidth.patch
 RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages \

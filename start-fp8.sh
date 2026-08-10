@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_PATH="/models/MiniMax-H3/FL2VA"
+RIG_MODE="${H3_RIG_MODE:-fl2va}"
+case "$RIG_MODE" in
+  fl2va) PARTITION="FL2VA" ;;
+  ref2va) PARTITION="Ref2VA" ;;
+  *)
+    printf 'startup security check: H3_RIG_MODE must be fl2va or ref2va\n' >&2
+    exit 1
+    ;;
+esac
+MODEL_PATH="/models/MiniMax-H3/$PARTITION"
 QUANT_CONFIG="$(tr -d '\n' </etc/minimax-h3/fp8-quant.json)"
 # shellcheck source=scripts/security-common.sh
 source /usr/local/lib/minimax-h3/security-common.sh
@@ -91,7 +100,10 @@ esac
 
 case "$STARTUP_WARMUP" in
   true)
-    export MINIMAX_H3_DUMMY_RUN_NUM_FRAMES=56
+    # The official H3 input contract requires output durations of at least
+    # four seconds. 96 requested frames is exactly four seconds at 24 fps
+    # before H3 aligns it to the native 17n+5 temporal boundary.
+    export MINIMAX_H3_DUMMY_RUN_NUM_FRAMES=96
     ;;
   false)
     export MINIMAX_H3_DUMMY_RUN_NUM_FRAMES=0
@@ -100,6 +112,30 @@ case "$STARTUP_WARMUP" in
     fail "H3_STARTUP_WARMUP must be true or false"
     ;;
 esac
+
+# Tradecraft's production runtime is the curve-compressed checkpoint. Refuse
+# to silently load a full AdaLN partition under the canonical FL2VA/Ref2VA
+# name; full checkpoints are retained only as offline *-Full references.
+TRANSFORMER_CONFIG="$MODEL_PATH/transformer/config.json"
+python - "$TRANSFORMER_CONFIG" <<'PY' ||
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    config = json.loads(path.read_text())
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"cannot read transformer config {path}: {exc}")
+grid = config.get("adaln_curve_grid")
+dimensions = config.get("time_embed_dim")
+if not isinstance(grid, int) or isinstance(grid, bool) or grid < 2:
+    raise SystemExit("canonical H3 partition is not AdaLN curve-compressed")
+if not isinstance(dimensions, int) or isinstance(dimensions, bool) or dimensions < 1:
+    raise SystemExit("curve-compressed H3 partition has an invalid time_embed_dim")
+PY
+  fail "production requires a curve-compressed H3 checkpoint in $MODEL_PATH"
+
 exec vllm serve "$MODEL_PATH" \
   --omni \
   --trust-remote-code \

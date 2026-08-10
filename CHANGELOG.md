@@ -2,13 +2,34 @@
 
 ## Unreleased
 
-- Added a fail-closed two-step 768x448x56 startup warmup for the FL2VA
-  text-to-video path and a health check that remains closed until it passes.
+- Added production AdaLN curve-checkpoint support and a converter that combines
+  the compact curve tensors with the unchanged official transformer weights.
+- Added a local-only Tutu curve-extension converter. It derives the smallest
+  bounded joint residual basis, reuses unchanged checkpoint shards, preserves
+  source provenance, and emits an unqualified adapter bundle for review.
+- Made curve-compressed FL2VA/Ref2VA a fail-closed production requirement;
+  full checkpoints are offline conversion and comparison sources, not runtime
+  profiles.
+- Validated canonical Ref2VA startup, image-plus-audio conditioning,
+  video-reference conditioning, and a decoded 20-step quality render while
+  retaining roughly 28 GiB available memory under inference.
+- Added an opt-in Ref2VA reference-image pixel budget that preserves the
+  legacy 2,048-pixel short-edge default unless a request explicitly selects
+  50-400 percent of the output pixel area.
+- Added matched legacy/200%/100% Ref2VA timing and frame-sheet evaluation; the
+  100% case was 2.54x the legacy generation rate on the recorded stress fixture.
+- Added an SM121 Sol-Attn microbenchmark against the production cuDNN backend;
+  sparse Sol was fast but rejected as a default because the controlled output
+  difference was too large for the behavior-preserving bar.
+- Added a fail-closed two-step 768x448 startup warmup using a valid four-second
+  H3 request and a health check that remains closed until it passes.
+- Backported the official H3 mixed-input matrix so Ref2VA accepts visual-only,
+  video-only, and mixed visual/audio references without forcing audio.
 - Persisted Humming, Triton, and TorchInductor kernel caches across container
   recreation.
 - Added a fixed-seed acceptance command that compares every decoded video
   frame, stereo audio PSNR, media validity, timings, and kernel-fallback logs.
-- Expanded the pinned-image suite to 18 regression tests.
+- Expanded the pinned-image suite to 34 regression tests.
 
 ## 1.1.0 - 2026-08-04
 
