@@ -3,7 +3,16 @@ set -euo pipefail
 
 RIG_MODE="${H3_RIG_MODE:-fl2va}"
 case "$RIG_MODE" in
-  fl2va) PARTITION="FL2VA" ;;
+  fl2va)
+    PARTITION="${H3_FL2VA_PARTITION:-FL2VA-TutuCurve-Step100/model}"
+    case "$PARTITION" in
+      FL2VA|FL2VA-TutuCurve-Step100/model) ;;
+      *)
+        printf 'startup security check: H3_FL2VA_PARTITION must be FL2VA or FL2VA-TutuCurve-Step100/model\n' >&2
+        exit 1
+        ;;
+    esac
+    ;;
   ref2va) PARTITION="Ref2VA" ;;
   *)
     printf 'startup security check: H3_RIG_MODE must be fl2va or ref2va\n' >&2

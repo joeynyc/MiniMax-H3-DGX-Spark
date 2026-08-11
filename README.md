@@ -156,6 +156,28 @@ The converter refuses to overwrite an existing output. The full source stays
 unchanged and supplies the shared encoders and VAEs through relative links, so
 keep the `*-Full` directory beside the canonical partition.
 
+The default FL2VA production profile uses the measured Tutu step100 8-NFE
+recipe. Build its extended curve bundle from the pinned upstream adapter after
+the canonical FL2VA conversion:
+
+```bash
+MODEL_ROOT=/absolute/path/to/MiniMax-H3
+TUTU_ADAPTER=/absolute/path/to/Tutu-MiniMax-H3-AudioVideo-20to8-NFE-LoRA/step100
+docker run --rm --entrypoint python \
+  -v "$MODEL_ROOT:/models" \
+  -v "$TUTU_ADAPTER:/tutu:ro" \
+  -v "$PWD/scripts:/scripts:ro" \
+  minimax-h3-dgx-spark:sm121-fp8 \
+  /scripts/prepare-h3-curve-tutu-adapter.py prepare-extended \
+  --full-model /models/FL2VA-Full \
+  --curve-model /models/FL2VA \
+  --source-adapter /tutu \
+  --destination /models/FL2VA-TutuCurve-Step100
+```
+
+The emitted `model/` partition also supports the ordinary 20-step request when
+no adapter is attached, so switching profiles does not reload the checkpoint.
+
 ```bash
 # Edit .env: model root, rig mode, HF cache path, and license acknowledgment.
 # The secure default listens only on 127.0.0.1.
@@ -165,11 +187,14 @@ make up
 make logs
 ```
 
-Set `H3_RIG_MODE=fl2va` for `MiniMax-H3/FL2VA` or `H3_RIG_MODE=ref2va`
-for `MiniMax-H3/Ref2VA`. The model root is mounted once and the launcher selects
-the requested task partition; both canonical directories must be
-curve-compressed. Switching modes requires recreating the single-model service.
-The `*-Full` sources are not selectable through the launcher.
+Set `H3_RIG_MODE=fl2va` with the default
+`H3_FL2VA_PARTITION=FL2VA-TutuCurve-Step100/model`, or set
+`H3_RIG_MODE=ref2va` for `MiniMax-H3/Ref2VA`. The allowlisted value `FL2VA`
+selects the standard curve partition as an explicit recovery fallback. The
+model root is mounted once and the launcher selects the requested task
+partition; both selectable forms must be curve-compressed. Switching modes
+requires recreating the single-model service. The `*-Full` sources are not
+selectable through the launcher.
 `MINIMAX_H3_LORA_ROOT` is a read-only mount for request-scoped PEFT adapters and
 does not activate any adapter by itself.
 

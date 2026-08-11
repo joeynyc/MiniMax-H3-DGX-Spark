@@ -167,5 +167,8 @@ bench lighting, and stable macro composition without an obvious decode or
 temporal failure. This closes the curve-compatibility and single-case transport
 gate, not the complete quality gate. Dialogue synchronization, fast motion,
 occlusion, complex camera movement, audio repeatability, and the full human
-rubric remain open. The standard eight-dimensional curve checkpoint stays the
-production default.
+rubric remain open. On 2026-08-10 the product decision nevertheless promoted
+the extended Tutu 8-NFE recipe to the ordinary T2VA/FL2VA performance profile:
+it cut warm render time by 42.6% in the matched case without an observed visual
+regression. The 20-step recipe remains the explicit high-fidelity fallback, and
+Ref2VA remains on it.

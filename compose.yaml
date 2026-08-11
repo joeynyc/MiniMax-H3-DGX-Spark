@@ -35,6 +35,7 @@ services:
       H3_LINEAR_BACKEND: ${H3_LINEAR_BACKEND:-CUTLASS}
       H3_STARTUP_WARMUP: ${H3_STARTUP_WARMUP:-true}
       H3_RIG_MODE: ${H3_RIG_MODE:-fl2va}
+      H3_FL2VA_PARTITION: ${H3_FL2VA_PARTITION:-FL2VA-TutuCurve-Step100/model}
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://$${H3_BIND_HOST}:$${H3_API_PORT}/health >/dev/null"]
       interval: 10s

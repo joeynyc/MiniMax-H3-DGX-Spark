@@ -46,6 +46,8 @@ expect_refuse 'H3_STARTUP_WARMUP must be' \
   -e H3_STARTUP_WARMUP=unsupported
 expect_refuse 'H3_RIG_MODE must be fl2va or ref2va' \
   -e H3_RIG_MODE=unsupported
+expect_refuse 'H3_FL2VA_PARTITION must be FL2VA or FL2VA-TutuCurve-Step100/model' \
+  -e H3_RIG_MODE=fl2va -e H3_FL2VA_PARTITION=../../unsafe
 
 model_root="$(mktemp -d)"
 trap 'rm -rf "$model_root"' EXIT
