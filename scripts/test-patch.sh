@@ -16,6 +16,7 @@ docker run --rm --entrypoint python \
   "$TEST_IMAGE" \
   -m pytest -q -p no:cacheprovider \
   /tests/test_h3_loader_patch.py \
+  /tests/test_diffusion_lora_mixed_dtype.py \
   /tests/test_h3_curve_checkpoint.py \
   /tests/test_h3_curve_tutu_adapter.py \
   /tests/test_h3_runtime_optimizations.py \

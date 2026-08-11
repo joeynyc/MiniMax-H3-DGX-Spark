@@ -73,6 +73,16 @@ the unchanged production shards reusable while allowing a checksum-pinned
 adapter-specific curve extension. The ordinary curve path is unchanged when
 the two dimensions are equal.
 
+## Diffusion LoRA dtype correction
+
+H3 keeps some latent inputs in FP32 while request-scoped adapters are stored in
+BF16. The pinned diffusion-LoRA layer previously multiplied those tensors
+directly and failed before denoising with a mixed-dtype matrix error. The
+backport of vLLM-Omni commit `9e35149a` casts only the LoRA branch to the adapter
+dtype, performs its two matrix multiplies, then restores the delta to the base
+output dtype before accumulation. The base model path and inactive adapters are
+unchanged.
+
 ## H3 inference optimizations
 
 The image also carries four behavior-preserving H3 changes developed against

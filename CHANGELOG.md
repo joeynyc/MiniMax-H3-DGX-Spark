@@ -7,6 +7,10 @@
 - Added a local-only Tutu curve-extension converter. It derives the smallest
   bounded joint residual basis, reuses unchanged checkpoint shards, preserves
   source provenance, and emits an unqualified adapter bundle for review.
+- Made the measured extended Tutu 8-NFE bundle the default FL2VA partition,
+  while retaining the standard curve partition as an allowlisted recovery path.
+- Backported vLLM-Omni's mixed-dtype diffusion-LoRA input repair so FP32 H3
+  latent inputs can execute BF16 request-scoped adapters without dtype errors.
 - Made curve-compressed FL2VA/Ref2VA a fail-closed production requirement;
   full checkpoints are offline conversion and comparison sources, not runtime
   profiles.
@@ -29,7 +33,7 @@
   recreation.
 - Added a fixed-seed acceptance command that compares every decoded video
   frame, stereo audio PSNR, media validity, timings, and kernel-fallback logs.
-- Expanded the pinned-image suite to 34 regression tests.
+- Expanded the pinned-image suite to 35 regression tests.
 
 ## 1.1.0 - 2026-08-04
 

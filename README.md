@@ -43,7 +43,7 @@ inspectable, and repeatable.
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 34 passed in the exact pinned image |
+| Regression tests | 35 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request

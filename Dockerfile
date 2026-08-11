@@ -45,6 +45,13 @@ RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages \
       < /tmp/humming_online_fp8_layout.patch \
     && rm /tmp/humming_online_fp8_layout.patch
+# Backport vLLM-Omni 9e35149a until the pinned H3 image includes the generic
+# mixed-dtype diffusion-LoRA input repair used by the Tutu performance recipe.
+COPY --chmod=0644 patches/vllm_omni_diffusion_lora_mixed_dtype.patch /tmp/vllm_omni_diffusion_lora_mixed_dtype.patch
+RUN patch --batch --forward -p0 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/vllm_omni_diffusion_lora_mixed_dtype.patch \
+    && rm /tmp/vllm_omni_diffusion_lora_mixed_dtype.patch
 COPY --chmod=0755 start-fp8.sh /usr/local/bin/start-minimax-h3
 COPY --chmod=0644 scripts/security-common.sh /usr/local/lib/minimax-h3/security-common.sh
 COPY --chmod=0644 fp8-quant.json /etc/minimax-h3/fp8-quant.json
