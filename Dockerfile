@@ -35,6 +35,24 @@ RUN patch --batch --forward -p1 \
       -d /usr/local/lib/python3.12/dist-packages \
       < /tmp/minimax_h3_reference_pixel_budget.patch \
     && rm /tmp/minimax_h3_reference_pixel_budget.patch
+# Backport the measured component-precision profile from vLLM-Omni commits
+# 98e93213, 2e453063, and 6527bc46. These are production invariants, not switches:
+# native Qwen projections use NF4, video VAE uses FP16, audio VAE stays FP32.
+COPY --chmod=0644 patches/minimax_h3_text_encoder_nf4.patch /tmp/minimax_h3_text_encoder_nf4.patch
+RUN patch --batch --forward -p1 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_text_encoder_nf4.patch \
+    && rm /tmp/minimax_h3_text_encoder_nf4.patch
+COPY --chmod=0644 patches/minimax_h3_video_vae_fp16.patch /tmp/minimax_h3_video_vae_fp16.patch
+RUN patch --batch --forward -p1 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_video_vae_fp16.patch \
+    && rm /tmp/minimax_h3_video_vae_fp16.patch
+COPY --chmod=0644 patches/minimax_h3_video_vae_reference_autocast.patch /tmp/minimax_h3_video_vae_reference_autocast.patch
+RUN patch --batch --forward -p1 \
+      -d /usr/local/lib/python3.12/dist-packages \
+      < /tmp/minimax_h3_video_vae_reference_autocast.patch \
+    && rm /tmp/minimax_h3_video_vae_reference_autocast.patch
 COPY --chmod=0644 patches/humming_gb10_bandwidth.patch /tmp/humming_gb10_bandwidth.patch
 RUN patch --batch --forward -p0 \
       -d /usr/local/lib/python3.12/dist-packages \

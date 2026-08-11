@@ -1,0 +1,79 @@
+diff --git a/vllm_omni/diffusion/models/minimax_h3/vae.py b/vllm_omni/diffusion/models/minimax_h3/vae.py
+index afdd5541..ddf40940 100644
+--- a/vllm_omni/diffusion/models/minimax_h3/vae.py
++++ b/vllm_omni/diffusion/models/minimax_h3/vae.py
+@@ -25,6 +25,7 @@ from .packed_tokens import minimax_h3_patchify_video_latent
+ MINIMAX_H3_KEYFRAME_ENCODE_SEED = 42
+ MINIMAX_H3_AUDIO_SAMPLE_RATE = 32000
+ MINIMAX_H3_AUDIO_CHANNELS = 2
++MINIMAX_H3_VIDEO_VAE_DTYPE = torch.float16
+ 
+ 
+ def _load_component_config(component_path: str) -> dict[str, Any]:
+@@ -109,10 +110,10 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+             component_path,
+             self.config_dict,
+         )
+-        # Match the reference loader contract: video VAE weights stay FP32.
+-        # Keyframe encoding is numerically sensitive to first casting the
+-        # checkpoint through FP16; decode still runs under FP16 autocast.
+-        self.remote.eval().to(device=device, dtype=torch.float32)
++        # H3's video VAE is safe to store and execute in FP16.  Keeping only
++        # this VAE in half precision halves its resident weights and decode
++        # peak; the separate audio VAE deliberately remains FP32.
++        self.remote.eval().to(device=device, dtype=MINIMAX_H3_VIDEO_VAE_DTYPE)
+         self.model = self.remote.model
+         self.use_tiling = True
+         self.use_slicing = False
+@@ -164,9 +165,6 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+         previous_parallel = self.model.parallel_tiling
+         self.model.parallel_tiling = False
+         parameter = next(self.parameters())
+-        previous_dtype = parameter.dtype
+-        if previous_dtype != torch.float32:
+-            self.to(torch.float32)
+         devices = [parameter.device] if parameter.device.type == "cuda" else []
+         try:
+             with torch.random.fork_rng(devices=devices):
+@@ -180,8 +178,6 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+                 )[0]
+         finally:
+             self.model.parallel_tiling = previous_parallel
+-            if previous_dtype != torch.float32:
+-                self.to(previous_dtype)
+ 
+         # Match the reference contract exactly: normalization and patchify
+         # happen on CPU in FP32 after the sampled encode. The condition noise
+@@ -208,23 +204,16 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+         frames: Any,
+     ) -> tuple[torch.Tensor, tuple[int, int, int]]:
+         parameter = next(self.parameters())
+-        previous_dtype = parameter.dtype
+-        if previous_dtype != torch.float32:
+-            self.to(torch.float32)
+         devices = [parameter.device] if parameter.device.type == "cuda" else []
+-        try:
+-            with torch.random.fork_rng(devices=devices):
+-                torch.default_generator.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+-                for device in devices:
+-                    with torch.cuda.device(device):
+-                        torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+-                latent = self.model.encode_videos(
+-                    frames,
+-                    use_fp16_latent=True,
+-                )[0]
+-        finally:
+-            if previous_dtype != torch.float32:
+-                self.to(previous_dtype)
++        with torch.random.fork_rng(devices=devices):
++            torch.default_generator.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
++            for device in devices:
++                with torch.cuda.device(device):
++                    torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
++            latent = self.model.encode_videos(
++                frames,
++                use_fp16_latent=True,
++            )[0]
+ 
+         latent = latent.float().cpu()
+         if latent.ndim == 4:

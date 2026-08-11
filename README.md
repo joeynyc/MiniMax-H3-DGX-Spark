@@ -34,7 +34,7 @@ inspectable, and repeatable.
 | Quantization | Online dynamic FP8; CUTLASS default, deterministic Humming eager alternative |
 | Full-compute default | cuDNN attention + regional compile, no cache |
 | Optional balanced profile | cuDNN + regional compile + Cache-DiT at `0.10` |
-| Curve Ref2VA model load | 77.1211 GiB; about 28 GiB remained available during a 20-step render |
+| Curve Ref2VA model load | 38.5744 GiB; 43,853 MiB highest observed allocation during the recorded 20-step render |
 | Auxiliary-model proof | Ref2VA render and 5.6 GB GPU-resident official `qwen3.5:9b` visual inference both completed; about 22 GiB remained available |
 | Historical full-model load | 89.1659 GiB; retained as comparison evidence only |
 | Baseline warmed request | 152.911 seconds client mean (sweep, two runs) |
@@ -43,7 +43,7 @@ inspectable, and repeatable.
 | Balanced warmed request | 80.579 seconds client mean (final image, two runs) |
 | Matched quality comparison | SSIM 0.881367; video PSNR 26.613264 dB |
 | Output shape observed | 768x448, 24 fps, H.264 + AAC stereo |
-| Regression tests | 35 passed in the exact pinned image |
+| Regression tests | 39 passed in the exact pinned image |
 
 These are observations from one machine, not vendor benchmarks or an upstream
 support guarantee. Each performance number above uses the same fixed request
@@ -58,9 +58,10 @@ flowchart LR
     A[Full checkpoint + curve tensors] --> B[Canonical curve checkpoint]
     B --> C[Pinned vLLM-Omni image]
     C --> D[SM121 compatibility + online FP8]
-    D --> E[cuDNN attention + regional compile]
-    E --> F[OpenAI-compatible video API]
-    F --> G[HTTP and FFmpeg verifier]
+    D --> E[Qwen NF4 + video VAE FP16]
+    E --> F[cuDNN attention + regional compile]
+    F --> G[OpenAI-compatible video API]
+    G --> H[HTTP and FFmpeg verifier]
 ```
 
 The patch makes four focused corrections:
@@ -77,6 +78,15 @@ large timestep-conditioned AdaLN projections. The launcher fails closed if a
 canonical partition is not curve-compressed, so a mode change cannot silently
 restore the memory-monopolizing full checkpoint. See
 [the measured curve decision](docs/CURVE_CHECKPOINT_EXPERIMENT.md).
+
+The packaged production image also fixes component precision to the measured
+one-Spark profile: transformer weights use dynamic online FP8, the retained
+Qwen3-VL projection matrices use BitsAndBytes NF4 with compressed statistics,
+the video VAE is stored and executed in FP16, and the audio VAE remains FP32.
+This is one runtime contract rather than an operator-facing quality switch.
+The pinned image backports vLLM-Omni commits `98e93213`, `2e453063`, and
+`6527bc46`, routes quantization by component, and tests the routing, decoder
+dtypes, and FP16 reference-encoding boundary.
 
 FlashAttention-4's CuTe variable-length kernel also failed for this packed H3
 shape on SM121. The measured release supports SDPA and cuDNN attention; cuDNN

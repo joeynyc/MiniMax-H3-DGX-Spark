@@ -11,6 +11,13 @@
   while retaining the standard curve partition as an allowlisted recovery path.
 - Backported vLLM-Omni's mixed-dtype diffusion-LoRA input repair so FP32 H3
   latent inputs can execute BF16 request-scoped adapters without dtype errors.
+- Made the measured component-precision profile the sole packaged runtime:
+  dynamic transformer FP8, native Qwen3-VL projection NF4, FP16 video VAE,
+  and FP32 audio VAE. The extended FL2VA model-load footprint fell from
+  77.1392 GiB to 38.5925 GiB on the recorded GB10 production cold start.
+- Autocast checkpoint-owned image and video preprocessing at the FP16 video-VAE
+  boundary, preventing Ref2VA's internal FP32 tensors from reaching half-weight
+  Conv3D layers while preserving FP32 latent normalization afterward.
 - Made curve-compressed FL2VA/Ref2VA a fail-closed production requirement;
   full checkpoints are offline conversion and comparison sources, not runtime
   profiles.
@@ -33,7 +40,7 @@
   recreation.
 - Added a fixed-seed acceptance command that compares every decoded video
   frame, stereo audio PSNR, media validity, timings, and kernel-fallback logs.
-- Expanded the pinned-image suite to 35 regression tests.
+- Expanded the pinned-image suite to 39 regression tests.
 
 ## 1.1.0 - 2026-08-04
 

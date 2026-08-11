@@ -172,3 +172,41 @@ the extended Tutu 8-NFE recipe to the ordinary T2VA/FL2VA performance profile:
 it cut warm render time by 42.6% in the matched case without an observed visual
 regression. The 20-step recipe remains the explicit high-fidelity fallback, and
 Ref2VA remains on it.
+
+## Packaged production precision confirmation
+
+On 2026-08-11, the measured NF4-text/FP16-video-VAE changes were folded into
+the pinned production image as the only component-precision configuration.
+The ordinary extended FL2VA cold start reproduced the research value exactly:
+38.5925 GiB at model load versus 77.1392 GiB in the previous packaged image.
+The worker reported 38.88 GiB after model initialization; the highest observed
+startup allocation was 49,691 MiB while the BF16 text projections were being
+loaded and quantized in place. Model initialization took 421.529 seconds.
+
+The normal product client then completed the fixed Tutu performance recipe in
+121.148 seconds and the adapter-free 20-step quality recipe in 230.142 seconds.
+Both outputs fully decoded as 768x448 H.264 with 107 frames plus 32 kHz stereo
+AAC, and the highest observed render allocation was 43,433 MiB. Inspection of
+both frame sheets found stable PCB, component, hand, and tool continuity with
+no obvious precision-induced decode or temporal failure. This confirms the
+packaged T2VA/FL2VA memory and media path; it does not close the remaining
+multi-case human-quality or audio-repeatability gates.
+
+The first packaged Ref2VA warmup exposed one integration defect: the remote
+checkpoint converts PIL and numpy references to FP32 inside its encoder, after
+the adapter has received the input, so those tensors reached FP16 Conv3D
+weights with incompatible dtypes. vLLM-Omni commit `6527bc46` adds an FP16
+autocast boundary around both remote reference encoders while retaining the
+existing FP32 latent normalization contract. A matching Conv3D regression now
+covers image and video references in the pinned image.
+
+After that repair, canonical Ref2VA loaded at 38.5744 GiB (38.92 GiB
+process-scoped), passed its image-reference startup warmup, and stayed healthy
+with zero restarts. Tradecraft's normal client completed an image-only,
+768x448, 4-second, seed-42, 20-step quality request in 244.668 seconds. Peak
+observed allocation was 43,853 MiB. The result fully decoded as 107 H.264
+frames plus 32 kHz stereo AAC, measured -21.7 dB mean audio, and retained the
+paired-host composition throughout the inspected frame sheet. Its file SHA-256
+was `8d57eebc78e74b2fcb3a5d7f8f03f78a2e6dd15a5c85bb066147766dc9de5504`.
+This closes the packaged Ref2VA dtype/media control, not the broader multi-case
+human-quality gate.

@@ -1,0 +1,45 @@
+diff --git a/vllm_omni/diffusion/models/minimax_h3/vae.py b/vllm_omni/diffusion/models/minimax_h3/vae.py
+--- a/vllm_omni/diffusion/models/minimax_h3/vae.py
++++ b/vllm_omni/diffusion/models/minimax_h3/vae.py
+@@ -169,10 +169,17 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+                 for device in devices:
+                     with torch.cuda.device(device):
+                         torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+-                latent = self.model.encode_images(
+-                    image,
+-                    use_fp16_latent=True,
+-                )[0]
++                # The checkpoint converts PIL/numpy references to FP32 tensors
++                # inside encode_images(). Autocast that remote-code boundary
++                # so its FP16 Conv3D weights receive compatible activations.
++                with torch.autocast(
++                    device_type=parameter.device.type,
++                    dtype=MINIMAX_H3_VIDEO_VAE_DTYPE,
++                ):
++                    latent = self.model.encode_images(
++                        image,
++                        use_fp16_latent=True,
++                    )[0]
+         finally:
+             self.model.parallel_tiling = previous_parallel
+ 
+@@ -207,10 +214,15 @@ class MiniMaxH3VideoVAE(nn.Module, DistributedVaeMixin):
+             for device in devices:
+                 with torch.cuda.device(device):
+                     torch.cuda.manual_seed(MINIMAX_H3_KEYFRAME_ENCODE_SEED)
+-            latent = self.model.encode_videos(
+-                frames,
+-                use_fp16_latent=True,
+-            )[0]
++            # encode_videos() also preprocesses references to FP32 internally.
++            with torch.autocast(
++                device_type=parameter.device.type,
++                dtype=MINIMAX_H3_VIDEO_VAE_DTYPE,
++            ):
++                latent = self.model.encode_videos(
++                    frames,
++                    use_fp16_latent=True,
++                )[0]
+ 
+         latent = latent.float().cpu()
+         if latent.ndim == 4:
