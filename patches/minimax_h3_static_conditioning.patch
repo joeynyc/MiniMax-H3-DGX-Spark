@@ -1,0 +1,89 @@
+--- denoise_loop.py
++++ denoise_loop.py
+@@ -14,6 +14,10 @@
+ 
+ import torch
+ 
++from .minimax_h3_transformer import (
++    MINIMAX_H3_STATIC_CONDITIONING_KWARG,
++    MiniMaxH3StaticConditioning,
++)
+ from .scheduling_minimax_h3_euler_ancestral import (
+     minimax_h3_euler_eta0_step,
+     minimax_h3_rf_v_to_x0,
+@@ -43,6 +47,7 @@
+         text_embeddings: torch.Tensor,
+         token_tags: torch.Tensor,
+         device: torch.device,
++        static_conditioning: MiniMaxH3StaticConditioning | None = None,
+     ) -> None:
+         seq_len = int(packed["seq_len"])
+         self.seq_len = seq_len
+@@ -69,11 +74,9 @@
+         self.audio_x_base = torch.zeros(1, seq_len, MINIMAX_H3_AUDIO_ROW_WIDTH, dtype=torch.float32, device=device)
+         text_pos_dev = packed["text_pos"].view(-1).to(torch.long).to(device)
+         self.static_kwargs: dict[str, Any] = {
+-            "img_position_ids": packed["img_position_ids"][None].to(device),
+             "update_mask": self.update_mask_dev,
+             "token_tags": token_tags.view(-1).to(torch.long).to(device),
+             "skip_mask_out_condition": False,
+-            "prompt_embeds": text_embeddings.to(device),
+             "img_pos_info": {"position_ids": self.img_pos_dev},
+             "audio_pos_info": {"position_ids": self.audio_pos_dev},
+             "text_pos_info": {"position_ids": text_pos_dev},
+@@ -82,11 +85,25 @@
+                 "cu_seqlens_q": cu.to(device),
+                 "max_seqlen_q": int(cu[1]),
+             },
+-            "refiner_packed_seq_params": {
+-                "cu_seqlens_q": torch.tensor([0, text_len, text_len], dtype=torch.int32, device=device),
+-                "max_seqlen_q": text_len,
+-            },
+         }
++        if static_conditioning is not None:
++            self.static_kwargs[MINIMAX_H3_STATIC_CONDITIONING_KWARG] = static_conditioning
++        else:
++            # Preserve the raw conditioning path for direct branch users.
++            self.static_kwargs.update(
++                {
++                    "img_position_ids": packed["img_position_ids"][None].to(device),
++                    "prompt_embeds": text_embeddings.to(device),
++                    "refiner_packed_seq_params": {
++                        "cu_seqlens_q": torch.tensor(
++                            [0, text_len, text_len],
++                            dtype=torch.int32,
++                            device=device,
++                        ),
++                        "max_seqlen_q": text_len,
++                    },
++                }
++            )
+ 
+     def forward_kwargs(
+         self,
+--- pipeline_minimax_h3.py
++++ pipeline_minimax_h3.py
+@@ -904,11 +904,23 @@
+ 
+         tags = packed["token_tags"].clone()
+         tags[packed["text_pos"]] = text_tags.cpu()
++        text_len = int(packed["text_pos"].view(-1).shape[0])
++        static_conditioning = self.transformer.prepare_static_conditioning(
++            prompt_embeds=text_embeddings.to(self.device),
++            img_position_ids=packed["img_position_ids"][None].to(self.device),
++            refiner_cu_seqlens=torch.tensor(
++                [0, text_len, text_len],
++                dtype=torch.int32,
++                device=self.device,
++            ),
++            refiner_max_seqlen=text_len,
++        )
+         branch = MiniMaxH3DenoiseBranch(
+             packed=packed,
+             text_embeddings=text_embeddings,
+             token_tags=tags,
+             device=self.device,
++            static_conditioning=static_conditioning,
+         )
+ 
+         visual_anchor = visual_condition

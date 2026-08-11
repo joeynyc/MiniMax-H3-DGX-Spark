@@ -1,0 +1,16 @@
+--- vllm_omni/diffusion/lora/layers/base_linear.py
++++ vllm_omni/diffusion/lora/layers/base_linear.py
+@@ -127,7 +127,12 @@
+             # LoRA shrink & expand as in add_lora_linear():
+             #   buffer = (x @ A.T)
+             #   y += buffer @ B.T
+-            delta = (x_flat @ A.t()) @ B.t()
++            # Diffusion inputs are not uniformly the model dtype. For example,
++            # MiniMax H3 keeps latent patch inputs in fp32 while the active
++            # adapter is stored in bf16. Match the LoRA weights for the two
++            # matmuls, then return the delta to the base output dtype.
++            lora_input = x_flat.to(dtype=A.dtype)
++            delta = ((lora_input @ A.t()) @ B.t()).to(dtype=y_flat.dtype)
+             y_flat[:, offset : offset + slice_size] = y_flat[:, offset : offset + slice_size] + delta
+             offset += slice_size
+ 

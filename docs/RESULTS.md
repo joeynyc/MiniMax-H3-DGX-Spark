@@ -1,7 +1,8 @@
 # Measured one-Spark results
 
-These results describe MiniMax H3 FL2VA on one NVIDIA DGX Spark. They are not
-vendor benchmarks, an upstream support guarantee, or a cross-machine claim.
+These results describe MiniMax H3 FL2VA and the specifically identified
+Ref2VA experiments on one NVIDIA DGX Spark. They are not vendor benchmarks,
+an upstream support guarantee, or a cross-machine claim.
 Generated artifacts, frames, request logs, and model weights are not included.
 
 ## Runtime identity
@@ -26,6 +27,7 @@ Generated artifacts, frames, request logs, and model weights are not included.
 | Model | MiniMax H3 FL2VA, served as `/models/MiniMax-H3/FL2VA` |
 | Quantization | Online dynamic FP8; six sensitive layers ignored |
 | FP8 linear backend | CUTLASS |
+| Optional FP8 linear backend | Deterministic Humming, eager/no-cache only |
 
 The image emitted a vLLM/vLLM-Omni major/minor mismatch warning. It is recorded
 here rather than hidden; this exact pinned combination passed the measured
@@ -212,12 +214,235 @@ warm runs within each profile produced matching SHA-256 hashes.
 The generated artifacts are not distributed in this public repository. See
 [the model-license notice](../MODEL-LICENSE.md).
 
+## Ref2VA reference-image pixel budget
+
+On 2026-08-08, the Ref2VA image built from this repository was tested with one
+matched image-only request after startup warmup. The source was a deliberately
+difficult 1672x941 composite character image containing two small faces,
+distinct hair colors, elongated joined anatomy, lace clothing, microphones,
+a mixing surface, and a detailed studio background. The prompt, 768x448 output,
+20 steps, four-second duration, flow shifts, and seed 42 remained fixed.
+
+| Reference policy | Encoded reference | Approx. reference latent positions | Logged Qwen presentation tokens | Client | Engine | Mean step |
+|---|---:|---:|---:|---:|---:|---:|
+| Legacy 2048 short edge | 3648x2048 | 29,184 | 7,190 | 636.913 s | 632.686 s | 31.634 s |
+| 200% output pixel area | 1120x608 | 2,660 | 830 | 268.877 s | 266.530 s | 13.327 s |
+| 100% output pixel area | 768x448 | 1,344 | 486 | **251.181 s** | **248.878 s** | **12.444 s** |
+
+All three requests returned HTTP 200, passed a complete FFmpeg decode, and
+contained 107 H.264 frames at 24 fps plus AAC-LC stereo audio at 32 kHz. The
+100% policy reduced client time by 60.56% (2.54x generation rate) versus the
+legacy policy. The 200% policy reduced it by 57.78% (2.37x), while costing only
+17.696 seconds more than 100%.
+
+Start, midpoint, end, and one-frame-per-second contact sheets were inspected.
+Both budgeted outputs retained the two faces, impossible neck geometry, hair
+colors, clothing, microphones, console, lighting, and background without an
+obvious systematic fidelity loss relative to legacy. Gesture and eye choices
+differed, as expected when a conditioning representation changes. This is one
+stress fixture rather than a universal quality proof. The product integration
+therefore selects 100% for ordinary full-frame references and offers 200% for
+many small subjects or unusually fine detail; the low-level patch preserves
+legacy behavior when the request field is omitted.
+
+The reproducible request harness is
+[`scripts/benchmark-ref2va-pixel-budget.sh`](../scripts/benchmark-ref2va-pixel-budget.sh).
+Generated media and the private source fixture are not distributed.
+
+## SM121 Sol-Attn feasibility check
+
+Sol-Attn was evaluated separately against the rig's actual cuDNN full-compute
+backend, rather than treating comparisons against SageAttention as transferable.
+The source checkout was `Saganaki22/ComfyUI-sol-attn` commit
+`90467f1c633ce53af7d77e4a1cc243b5001d89b0`, with H3-shaped BF16 tensors
+(`B=1`, `H=56`, `D=128`), seed 42, three warmups, and the median of ten timed
+iterations on PyTorch 2.11.0+cu130.
+
+| Tokens | cuDNN | Sol BF16 | BF16 speedup | Sol int8 Q/K | int8 speedup | Sol exact rel. L2 | Sparse BF16 rel. L2 | Sparse int8 rel. L2 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8,192 | 20.538 ms | 10.000 ms | 2.05x | 9.198 ms | 2.23x | 0.000168 | 0.747955 | 0.747994 |
+| 16,384 | 82.115 ms | 35.113 ms | 2.34x | 30.266 ms | 2.71x | 0.000199 | 0.747746 | 0.747785 |
+| 32,768 | 330.062 ms | 129.007 ms | 2.56x | 110.033 ms | 3.00x | 0.000231 | 0.754727 | 0.754765 |
+
+The all-exact Sol setting (`tau=-100`) closely matched cuDNN, validating the
+SM121 kernel path and the comparison harness. The default sparse setting
+(`tau=1`) was materially approximate on the random fixture. Relative L2 on
+random activations is not a video-quality score, but a difference this large
+does not meet the project's behavior-preserving adoption bar. No Sol-Attn code
+was vendored and it is not a production default. A future visual branch may
+evaluate scheduled sparsity, dense early/late steps, and exact conditioning
+blocks before any product integration.
+
+The reproducible microbenchmark is
+[`scripts/benchmark-sol-attn.py`](../scripts/benchmark-sol-attn.py); it requires
+an explicit external Sol-Attn checkout.
+
+## Cumulative optimization A/B
+
+On 2026-08-05, the same request above was repeated around the four cumulative
+H3 inference optimizations described in [PATCH.md](PATCH.md). The baseline was
+captured from the already-running compatibility image. The optimized image was
+then cold-started and rendered twice without changing the request.
+
+| Measurement | Baseline | Optimized first | Optimized repeat |
+|---|---:|---:|---:|
+| HTTP wall time | 168.169 s | 158.221 s | 151.578 s |
+| Server generation stage | 157.536 s | 155.366 s | 148.049 s |
+| Mean denoising step | 7.877 s | 7.768 s | 7.402 s |
+| MP4 response encoding | 10.602 s | 2.723 s | 3.493 s |
+| Full FFmpeg decode | Passed | Passed | Passed |
+| Video frames | 56 | 56 | 56 |
+| Audio | AAC-LC stereo, 32 kHz | Same | Same |
+
+Relative to the captured baseline, optimized server generation improved by
+1.38% on the first request and 6.02% on the immediate repeat. HTTP wall time
+improved by 5.92% and 9.87%, respectively, but most of the first wall-time
+difference came from variable MP4 encoding and must not be attributed to the
+model changes.
+
+The two optimized renders decoded to byte-identical raw video frames. Compared
+with the baseline, the optimized trajectory was visually coherent and
+comparably detailed but not pixel-identical (video SSIM 0.745). Diffusion can
+amplify small floating-point changes, so this is an output-integrity check, not
+a formal quality equivalence result. The earlier acceptance timing on this
+same machine also demonstrates material system variance; use repeated local
+measurements before making capacity claims.
+
+## Historical eager-only Humming FP8 GEMM A/B
+
+The four dominant linear shapes were benchmarked with the same online-FP8
+contract used by H3: dynamic per-token E4M3 activations, static per-tensor E4M3
+weights, BF16 output, and FP32 accumulation. Humming's batch-invariant
+scheduler completed the four-linears set in approximately 74.2 ms versus 81.6
+ms for CUTLASS in the five-launch isolated test. The large QKV projection was
+bit-repeatable with the batch-invariant scheduler and changed by as much as
+0.0625 BF16 units between launches with Humming's default Stream-K schedule.
+
+The full model was then cold-started in the older cuDNN/eager/no-cache profile
+with corrected Humming activation-schema and weight-layout handling. It
+reported 89.1669 GiB and 479.475 seconds for model loading. The fixed-seed
+acceptance request was rendered twice.
+
+| Measurement | CUTLASS + cuDNN repeat | Humming first | Humming repeat |
+|---|---:|---:|---:|
+| HTTP wall time | 126.839 s | 147.769 s | 121.472 s |
+| Server generation stage | 125.241 s | 144.091 s | 117.494 s |
+| Mean denoising step | 6.262 s | 7.205 s | 5.875 s |
+| MP4 response encoding | 1.574 s | 3.550 s | 3.946 s |
+| Full FFmpeg decode | Passed | Passed | Passed |
+| Video frames | 56 | 56 | 56 |
+| Audio | AAC-LC stereo, 32 kHz | Same | Same |
+
+The first Humming request includes JIT work. On the immediate repeat, server
+generation and mean denoise-step latency improved by 6.19% relative to the
+profile-matched eager CUTLASS result; HTTP wall time improved by 4.23% because
+MP4 encoding varied independently.
+
+The two Humming renders had byte-identical decoded video frames. Their decoded
+audio differed only at approximately 164 dB PSNR, consistent with negligible
+AAC encoder-level variation. CUTLASS and Humming follow different valid FP32
+accumulation orders, so their diffusion trajectories were not pixel-identical
+(video SSIM 0.706). Contact-sheet inspection found both outputs coherent,
+detailed, and faithful to the macro PCB soldering prompt; this is an integrity
+check, not a formal perceptual-quality equivalence study.
+
+This experiment predates the current regional-compile/CUTLASS reconfirmation
+and is not directly comparable with its 111.373-second warmed client mean.
+Humming is therefore not selected by default. It remains a deterministic
+eager/no-cache alternative for operators who want to reproduce the isolated
+comparison; the launcher rejects Humming with compile or Cache-DiT.
+
+## Historical eager-only kernel-cache and readiness validation
+
+On 2026-08-06, the older Humming/eager/no-cache profile was started once with
+an empty dedicated kernel cache and recreated once with the populated cache.
+Both starts remained unhealthy until a two-step text-only warmup at the
+production 768x448x56 shape completed.
+
+| Measurement | Empty cache | Populated cache |
+|---|---:|---:|
+| Model loading | 494.114 s | 479.222 s |
+| Production-shape warmup | 43.624 s | 37.871 s |
+| Container start to healthy | 9m59s | 9m29s |
+| Cache after readiness | 23.4 MB, 682 files | 22,821,931 bytes, 690 files |
+
+The populated-cache warmup was 5.753 seconds (13.2%) faster. The cache held
+Humming, Triton, and TorchInductor artifacts and remained exactly 22,821,931
+bytes / 690 files across the second container recreation, demonstrating reuse
+without new compilation. Checkpoint loading still dominated total startup and
+is not expected to benefit from these kernel caches.
+
+After the empty-cache start, the full 20-step seed-42 request was rendered
+twice by `make acceptance`:
+
+| Measurement | First | Repeat |
+|---|---:|---:|
+| HTTP wall time | 118.691 s | 118.494 s |
+| Full FFmpeg decode | Passed | Passed |
+| Video | 56 frames, H.264, 768x448, 24 fps | Same |
+| Audio | AAC-LC stereo, 32 kHz | Same |
+
+Every decoded video frame was byte-identical. Both decoded audio channels
+compared at infinite PSNR, and no kernel-fallback message appeared during the
+acceptance window.
+
+The first full request immediately after the populated-cache restart completed
+in 120.794 seconds with HTTP 200 and a successful full media decode. It stayed
+within the established 118--121 second eager/Humming range, so the first user
+request no longer carried that profile's earlier Humming JIT penalty. These
+startup figures are not performance evidence for the newer default
+regional-compile/CUTLASS profile.
+
+## Current default review-candidate revalidation
+
+On 2026-08-06, the cumulative branch was rebased onto repository main at
+`7bd148f` and rebuilt with its documented defaults: cuDNN attention, regional
+compile, no cache, CUTLASS FP8, and production-shape startup warmup. This is a
+direct revalidation of the review candidate, separate from the historical
+eager/Humming measurements above.
+
+Model loading used 89.1659 GiB and took 482.705 seconds. The two-step
+768x448x56 warmup then completed in 33.738 seconds, and application readiness
+arrived about 9 minutes 2 seconds after container start. The persistent cache
+volume was already populated from earlier validation, so this is a
+populated-cache observation rather than an empty-cache benchmark.
+
+`make acceptance` then rendered the fixed 20-step seed-42 request twice:
+
+| Measurement | First | Repeat |
+|---|---:|---:|
+| HTTP wall time | 115.204 s | 113.295 s |
+| Full FFmpeg decode | Passed | Passed |
+| Video | 56 frames, H.264, 768x448, 24 fps | Same |
+| Audio | AAC-LC stereo, 32 kHz | Same |
+
+The 114.250-second client mean is consistent with the prior 111.373-second
+full-compute reconfirmation under ordinary run variance. Every decoded video
+frame was byte-identical, both decoded audio channels compared at infinite
+PSNR, and no cuDNN or linear-kernel fallback was logged during the acceptance
+window. The container remained healthy with zero OOM kills and zero restarts.
+
 ## Patch tests
 
-Five focused tests passed inside the exact base image:
+Eighteen focused tests passed inside the exact built image, covering:
 
 1. grouped QKV layout normalization;
 2. native parameter-loader contract preservation;
 3. fused fc1 layout validation;
-4. native CUDA FP8 activation-quantizer binding; and
-5. BF16 AdaLN activation input after FP8 weight conversion.
+4. native CUDA FP8 activation-quantizer binding;
+5. BF16 AdaLN activation input after FP8 weight conversion;
+6. packed attention-mask construction and propagation;
+7. static-conditioning branch wiring and raw-input fallback;
+8. pipeline-level conditioning preparation;
+9. fused SwiGLU selection;
+10. direct modality embedding assignment;
+11. guarded GB10 bandwidth discovery and unknown-device failure;
+12. canonical Humming online-FP8 weight restoration and validation;
+13. preservation of dynamic per-token Humming activation scaling;
+14. Humming-only batch-invariant scheduler configuration;
+15. the MiniMax H3 production warmup shape and text-only conditioning; and
+16. shared-engine model-specific warmup settings and completion logging.
+
+The remaining cases cover rejection paths within those categories. Launcher
+contract tests additionally verify that unrecognized attention and linear
+backends are rejected before model startup.

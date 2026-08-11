@@ -1,0 +1,36 @@
+--- vllm_omni/diffusion/diffusion_engine.py
++++ vllm_omni/diffusion/diffusion_engine.py
+@@ -815,6 +815,9 @@
+         use_audio_condition = bool(
+             model_warmup_attr("dummy_run_use_audio_condition", supports_audio_input)
+         )
++        audio_as_waveform_tuple = bool(
++            model_warmup_attr("dummy_run_audio_as_waveform_tuple", False)
++        )
+         if use_image_condition:
+             # Provide a dummy image input if the model supports it
+             color_format = image_color_format(self.od_config.model_class_name)
+@@ -825,7 +828,10 @@
+         if use_audio_condition:
+             audio_sr = 16000
+             dummy_audio = np.random.randn(audio_sr * 2).astype(np.float32)
+-            prompt.setdefault("multi_modal_data", {})["audio"] = dummy_audio
++            prompt.setdefault("multi_modal_data", {})["audio"] = (
++                (dummy_audio, audio_sr)
++                if audio_as_waveform_tuple else dummy_audio
++            )
+ 
+         req = OmniDiffusionRequest(
+             request_id="dummy_run",
+--- vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
++++ vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+@@ -278,6 +278,9 @@
+     dummy_run_use_audio_condition: ClassVar[bool] = (
+         os.getenv("H3_RIG_MODE", "fl2va").lower() == "ref2va"
+     )
++    # MiniMax H3's loader needs the sample rate alongside the waveform;
++    # retain the generic raw-array warmup contract for every other model.
++    dummy_run_audio_as_waveform_tuple: ClassVar[bool] = True
+     dummy_run_prompt: ClassVar[str] = (
+         "Macro soldering a PCB under warm bench light, soft room tone."
+     )

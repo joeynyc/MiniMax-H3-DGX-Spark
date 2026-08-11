@@ -1,0 +1,111 @@
+--- vllm_omni/diffusion/diffusion_engine.py
++++ vllm_omni/diffusion/diffusion_engine.py
+@@ -792,19 +792,38 @@
+-
++
+     def _dummy_run(self):
+         """A dummy run to warm up the model."""
+-        num_inference_steps = 1
+-        height = 512
+-        width = 512
+-        prompt: OmniTextPrompt = {"prompt": "dummy run"}
++        model_cls = DiffusionModelRegistry._try_load_model_cls(
++            self.od_config.model_class_name
++        )
++
++        def model_warmup_attr(name: str, default):
++            if model_cls is None:
++                return default
++            return getattr(model_cls, name, default)
++
++        num_inference_steps = int(
++            model_warmup_attr("dummy_run_num_inference_steps", 1)
++        )
++        height = int(model_warmup_attr("dummy_run_height", 512))
++        width = int(model_warmup_attr("dummy_run_width", 512))
++        prompt: OmniTextPrompt = {
++            "prompt": str(model_warmup_attr("dummy_run_prompt", "dummy run"))
++        }
+-
++
+         supports_image_input, supports_audio_input = supports_multimodal_input(self.od_config)
++        use_image_condition = bool(
++            model_warmup_attr("dummy_run_use_image_condition", supports_image_input)
++        )
++        use_audio_condition = bool(
++            model_warmup_attr("dummy_run_use_audio_condition", supports_audio_input)
++        )
+-        if supports_image_input:
++        if use_image_condition:
+             # Provide a dummy image input if the model supports it
+             color_format = image_color_format(self.od_config.model_class_name)
+             dummy_image = PIL.Image.new(color_format, (width, height))
+             prompt.setdefault("multi_modal_data", {})["image"] = dummy_image
+-
++
+-        if supports_audio_input:
++        if use_audio_condition:
+             audio_sr = 16000
+             dummy_audio = np.random.randn(audio_sr * 2).astype(np.float32)
+             prompt.setdefault("multi_modal_data", {})["audio"] = dummy_audio
+@@ -831,12 +844,27 @@
+-                extra_args={"cfg_text_scale": 1.0, "cfg_img_scale": 1.0},
++                extra_args={
++                    "cfg_text_scale": 1.0,
++                    "cfg_img_scale": 1.0,
++                    "aspect_ratio": "16:9",
++                },
+             ),
+         )
+-        logger.info("dummy run to warm up the model")
++        logger.info(
++            "dummy run to warm up the model: %dx%dx%d, steps=%d",
++            width,
++            height,
++            num_frames,
++            num_inference_steps,
++        )
++        warmup_started = time.monotonic()
+         request = self.pre_process_func(req) if self.pre_process_func is not None else req
+         output = self.add_req_and_wait_for_response(request)
+         if output.error:
+             raise RuntimeError(f"Dummy run failed: {output.error}")
++        logger.info(
++            "dummy model warmup completed in %.3f seconds",
++            time.monotonic() - warmup_started,
++        )
+-
++
+     def _submit_rpc(
+         self,
+         method: str,
+--- vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
++++ vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+@@ -261,8 +261,25 @@
+         "diffuse",
+         "decode",
+     ]
+-    dummy_run_num_frames: ClassVar[int] = 0
++    dummy_run_num_frames: ClassVar[int] = int(
++        os.getenv("MINIMAX_H3_DUMMY_RUN_NUM_FRAMES", "96")
++    )
++    dummy_run_num_inference_steps: ClassVar[int] = 2
++    dummy_run_height: ClassVar[int] = 448
++    dummy_run_width: ClassVar[int] = 768
++    # FL2VA's production text-to-video warmup must remain unconditioned,
++    # while Ref2VA cannot execute without a visual reference. Select the
++    # synthetic image using the same explicit partition mode as the launcher.
++    dummy_run_use_image_condition: ClassVar[bool] = (
++        os.getenv("H3_RIG_MODE", "fl2va").lower() == "ref2va"
++    )
++    dummy_run_use_audio_condition: ClassVar[bool] = (
++        os.getenv("H3_RIG_MODE", "fl2va").lower() == "ref2va"
++    )
++    dummy_run_prompt: ClassVar[str] = (
++        "Macro soldering a PCB under warm bench light, soft room tone."
++    )
+-
++
+     def __init__(
+         self,
+         *,

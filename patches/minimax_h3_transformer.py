@@ -22,6 +22,7 @@ import torch.nn as nn
 from cache_dit import ForwardPattern
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -63,6 +64,8 @@ class MiniMaxH3DiTArchConfig:
     timestep_input_dim: int = 256
     time_embed_hidden_size: int = 5376
     time_embed_dim: int = 2688
+    adaln_curve_grid: int | None = None
+    adaln_curve_base_dim: int | None = None
     adaln_out_features: int = 18 * 5376
     final_adaln_out_features: int = 2 * 5376
     rope_inv_freq_len: int = 16
@@ -79,6 +82,18 @@ class MiniMaxH3DiTArchConfig:
         arch = cls(**values)
         if len(arch.patch_size) != 3:
             raise ValueError(f"patch_size must contain three values, got {arch.patch_size!r}")
+        if arch.adaln_curve_grid is None:
+            if arch.adaln_curve_base_dim is not None:
+                raise ValueError(
+                    "adaln_curve_base_dim requires an AdaLN curve checkpoint"
+                )
+        else:
+            if arch.adaln_curve_base_dim is None:
+                arch.adaln_curve_base_dim = arch.time_embed_dim
+            if not 1 <= arch.adaln_curve_base_dim <= arch.time_embed_dim:
+                raise ValueError(
+                    "adaln_curve_base_dim must be between 1 and time_embed_dim"
+                )
         return arch
 
 
@@ -124,12 +139,34 @@ def _bind_native_cuda_fp8_activation_quantizers(root: nn.Module) -> int:
     return bound
 
 
-MINIMAX_H3_FP32_BUFFER_NAMES = frozenset({"rope.inv_freq"})
+MINIMAX_H3_FP32_BUFFER_NAMES = frozenset({"rope.inv_freq", "adaln_t_table"})
 
 # AdaLN modality count: token tags carry -1 for padding and 0/1/2 for
 # video/text/audio tokens (padding is clamped to 0 before the embedding
 # lookup and masked out afterwards).
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
+MINIMAX_H3_STATIC_CONDITIONING_KWARG = "static_conditioning"
+_MINIMAX_H3_PREPARE_STATIC_CONDITIONING_KWARG = "prepare_static_conditioning"
+
+
+@dataclass(frozen=True)
+class MiniMaxH3StaticConditioning:
+    """Timestep-invariant conditioning prepared for one generation request."""
+
+    refined_prompt_embeds: torch.Tensor
+    rope_freqs: torch.Tensor
+
+
+def _build_packed_attention_mask(
+    *,
+    used_seqlen: int,
+    packed_seqlen: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Build H3's padding mask from host-side packed-layout lengths."""
+    if used_seqlen >= packed_seqlen:
+        return None
+    return torch.arange(packed_seqlen, device=device)[None] < used_seqlen
 
 
 def _required_kwarg(kwargs: dict[str, Any], key: str) -> Any:
@@ -158,6 +195,8 @@ _FORWARD_SUPPORTED_KWARGS = frozenset(
         "img_pos_for_infer_output_info",
         "packed_seq_params",
         "refiner_packed_seq_params",
+        MINIMAX_H3_STATIC_CONDITIONING_KWARG,
+        _MINIMAX_H3_PREPARE_STATIC_CONDITIONING_KWARG,
     }
 )
 
@@ -218,6 +257,24 @@ def _prepare_h3_checkpoint_weight(
             "MiniMax H3 fc1 checkpoint rows must split evenly into "
             f"gate/up matrices, got {tuple(weight.shape)}"
         )
+    base_dimensions = arch.adaln_curve_base_dim
+    if (
+        arch.adaln_curve_grid is not None
+        and base_dimensions is not None
+        and base_dimensions < arch.time_embed_dim
+        and weight.ndim == 2
+        and weight.shape[1] == base_dimensions
+        and (
+            name == "adaln_t_table"
+            or name.endswith(".adaln_proj.linear.weight")
+        )
+    ):
+        extension = torch.zeros(
+            (*weight.shape[:-1], arch.time_embed_dim - base_dimensions),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        return torch.cat((weight, extension), dim=-1)
     return weight
 
 
@@ -255,6 +312,27 @@ def _modulate_gate(
 ) -> torch.Tensor:
     # Apply the per-index gated residual: x + gate[idx] * other.
     return (x + gate.index_select(0, indices) * other).to(dtype)
+
+
+def _interpolate_h3_adaln_curve(
+    table: torch.Tensor,
+    timesteps: torch.Tensor,
+) -> torch.Tensor:
+    """Interpolate compact AdaLN coordinates for normalized H3 timesteps."""
+    if table.dim() != 2 or table.shape[0] < 2:
+        raise ValueError(
+            "MiniMax H3 AdaLN curve table must be [grid >= 2, dimensions], "
+            f"got {tuple(table.shape)}."
+        )
+    pos = timesteps.to(device=table.device, dtype=_FP32_DTYPE).clamp(0.0, 1.0)
+    pos = pos * (table.shape[0] - 1)
+    lower = pos.floor().to(torch.long).clamp(max=table.shape[0] - 2)
+    fraction = (pos - lower).unsqueeze(1)
+    return torch.lerp(
+        table.index_select(0, lower),
+        table.index_select(0, lower + 1),
+        fraction,
+    )
 
 
 class MiniMaxH3Rope(nn.Module):
@@ -425,19 +503,15 @@ class MiniMaxH3Attention(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        attn_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """Run packed attention as a small eager island.
 
-        The scalar packed-layout metadata and the CuTe FlashAttention-4 DSL
-        are intentionally opaque to Dynamo. Keeping this boundary narrow lets
-        regional compile fuse projections, norms, RoPE, and the surrounding
-        DiT block without repeatedly graph-breaking inside the FA4 compiler.
+        The CuTe FlashAttention-4 DSL is intentionally opaque to Dynamo.
+        Keeping this boundary narrow lets regional compile fuse projections,
+        norms, RoPE, and the surrounding DiT block without repeatedly
+        graph-breaking inside the FA4 compiler.
         """
-        used = int(cu_seqlens[1].item())
-        packed_total = int(cu_seqlens[-1].item())
-        attn_mask = None
-        if used < packed_total:
-            attn_mask = torch.arange(packed_total, device=q.device)[None] < used
         metadata = AttentionMetadata(
             attn_mask=attn_mask,
             extra={
@@ -461,6 +535,7 @@ class MiniMaxH3Attention(nn.Module):
         rope_freqs: torch.Tensor | None,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        attn_mask: torch.Tensor | None,
         sp_seq_lens: list[int] | None = None,
     ) -> torch.Tensor:
         """x: [T, hidden] packed thd rows -> [T, hidden].
@@ -497,6 +572,7 @@ class MiniMaxH3Attention(nn.Module):
             v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            attn_mask=attn_mask,
         )
         out = out.reshape(total, self.num_heads * self.head_dim)
         out, _ = self.out_proj(out)
@@ -518,8 +594,7 @@ class MiniMaxH3MLP(nn.Module):
             params_dtype=_BF16_DTYPE,
             quant_config=quant_config,
         )
-        # Chunk the fused fc1 output as [gate, up], then compute
-        # silu(gate) * up.
+        self.act_fn = SiluAndMul()
         self.fc2 = RowParallelLinear(
             arch.ffn_hidden_size,
             arch.hidden_size,
@@ -531,8 +606,7 @@ class MiniMaxH3MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden, _ = self.fc1(x)
-        gate, up = hidden.chunk(2, dim=-1)
-        hidden = nn.functional.silu(gate) * up
+        hidden = self.act_fn(hidden)
         out, _ = self.fc2(hidden)
         return out
 
@@ -563,21 +637,26 @@ class MiniMaxH3AdalnProj(nn.Module):
         self.expand_ratio = expand_ratio
         self.modality_num = modality_num
         self.hidden_size = arch.hidden_size
+        self.apply_silu = arch.adaln_curve_grid is None
+        params_dtype = _BF16_DTYPE if self.apply_silu else _FP32_DTYPE
         self.linear = ColumnParallelLinear(
             arch.time_embed_dim,
             out_features,
             bias=True,
             gather_output=True,
-            params_dtype=_BF16_DTYPE,
-            quant_config=quant_config,
+            params_dtype=params_dtype,
+            # Curve weights are tiny and intentionally evaluated in fp32.
+            quant_config=quant_config if self.apply_silu else None,
         )
 
     def forward(self, t_emb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """t_emb: [M, t_dim] -> expand_ratio tensors of [M*modality_num, H]."""
-        x = nn.functional.silu(t_emb)
-        # Online FP8 replaces ``weight`` with an FP8 parameter after loading;
-        # activations must remain BF16 and be quantized by the linear kernel.
-        x, _ = self.linear(x.to(_BF16_DTYPE))
+        x = nn.functional.silu(t_emb) if self.apply_silu else t_emb
+        # Online FP8 replaces full-checkpoint ``weight`` with an FP8 parameter
+        # after loading. Curve-form projections stay fp32 and skip SiLU because
+        # their coordinates already describe the time-embedding curve.
+        input_dtype = _BF16_DTYPE if self.apply_silu else _FP32_DTYPE
+        x, _ = self.linear(x.to(input_dtype))
         m = x.shape[0]
         x = x.view(m * self.modality_num, self.expand_ratio * self.hidden_size)
         return tuple(x.chunk(self.expand_ratio, dim=-1))
@@ -610,12 +689,14 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        attn_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
             rope_freqs=None,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            attn_mask=attn_mask,
         )
         x = x + self.mlp(self.norm2(x))
         return x
@@ -639,9 +720,15 @@ class MiniMaxH3TokenRefiner(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        attn_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         for block in self.blocks:
-            x = block(x, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+            x = block(
+                x,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                attn_mask=attn_mask,
+            )
         return self.final_norm(x)
 
 
@@ -673,6 +760,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         rope_freqs: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        attn_mask: torch.Tensor | None,
         sp_seq_lens: list[int] | None = None,
     ) -> torch.Tensor:
         """x: [T, H]; t_emb: [M, t_dim]; combined_indices: [T]
@@ -699,6 +787,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             rope_freqs=rope_freqs,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            attn_mask=attn_mask,
             sp_seq_lens=sp_seq_lens,
         )
         x = _modulate_gate(residual, gate_msa, h, combined_indices, dtype=_BF16_DTYPE)
@@ -829,7 +918,17 @@ class MiniMaxH3DiTModel(nn.Module):
         },
         "sp_gather": SequenceParallelOutput(gather_dim=0, expected_dims=2),
     }
-    packed_modules_mapping = {}
+    # The native H3 checkpoint stores fused QKV weights, while Diffusers LoRA
+    # adapters commonly target logical to_q/to_k/to_v modules. Expose those
+    # logical names so vLLM can assemble their deltas into qkv_proj.
+    stacked_params_mapping = [
+        (".attn.qkv_proj", ".attn.q_proj", "q"),
+        (".attn.qkv_proj", ".attn.k_proj", "k"),
+        (".attn.qkv_proj", ".attn.v_proj", "v"),
+    ]
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
 
     def _validate_tp_config(self, *, arch: MiniMaxH3DiTArchConfig, tp_size: int) -> None:
         if tp_size < 1:
@@ -908,7 +1007,23 @@ class MiniMaxH3DiTModel(nn.Module):
             params_dtype=_BF16_DTYPE,
             quant_config=quant_config,
         )
-        self.time_embedder = MiniMaxH3TimeEmbedder(arch, quant_config)
+        if arch.adaln_curve_grid is None:
+            self.time_embedder = MiniMaxH3TimeEmbedder(arch, quant_config)
+        else:
+            if arch.adaln_curve_grid < 2:
+                raise ValueError(
+                    "adaln_curve_grid must contain at least two rows, got "
+                    f"{arch.adaln_curve_grid}."
+                )
+            self.register_buffer(
+                "adaln_t_table",
+                torch.empty(
+                    arch.adaln_curve_grid,
+                    arch.time_embed_dim,
+                    dtype=_FP32_DTYPE,
+                ),
+                persistent=True,
+            )
         self.rope = MiniMaxH3Rope(arch.rope_inv_freq_len)
         self.token_refiner = MiniMaxH3TokenRefiner(arch, quant_config)
         self.blocks = nn.ModuleList([MiniMaxH3DiTBlock(arch, quant_config) for _ in range(arch.num_layers)])
@@ -938,6 +1053,12 @@ class MiniMaxH3DiTModel(nn.Module):
         for name, buffer in self.named_buffers():
             if name in MINIMAX_H3_FP32_BUFFER_NAMES and buffer.dtype != _FP32_DTYPE:
                 raise ValueError(f"{name} must stay fp32 after load, got {buffer.dtype}.")
+        if self.arch.adaln_curve_grid is not None:
+            for name, param in self.named_parameters():
+                if ".adaln_proj.linear." in name and param.dtype != _FP32_DTYPE:
+                    raise ValueError(
+                        f"curve-form {name} must stay fp32 after load, got {param.dtype}."
+                    )
 
     def load_weights(
         self,
@@ -951,6 +1072,17 @@ class MiniMaxH3DiTModel(nn.Module):
             param = params.get(name)
             if param is None:
                 logger.warning("Skipping MiniMax H3 weight not present in model: %s", name)
+                continue
+            if (
+                name == "adaln_t_table"
+                and name in loaded
+                and self.arch.adaln_curve_base_dim is not None
+                and self.arch.adaln_curve_base_dim < self.arch.time_embed_dim
+                and loaded_weight.ndim == 2
+                and loaded_weight.shape[1] == self.arch.adaln_curve_base_dim
+            ):
+                # A curve-extension overlay may be enumerated before the base
+                # shard. Never let the smaller base table erase its columns.
                 continue
             loaded_weight = _prepare_h3_checkpoint_weight(
                 name,
@@ -982,18 +1114,124 @@ class MiniMaxH3DiTModel(nn.Module):
             raise ValueError(f"{key}.{field} is required")
         return value
 
+    def _refine_prompt_embeddings(
+        self,
+        *,
+        prompt_embeds: torch.Tensor,
+        refiner_cu_seqlens: torch.Tensor,
+        refiner_max_seqlen: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        text_rows = prompt_embeds.to(device=device, dtype=_BF16_DTYPE)
+        text_embed, _ = self.condition_proj(text_rows)
+        refiner_attn_mask = _build_packed_attention_mask(
+            used_seqlen=refiner_max_seqlen,
+            packed_seqlen=int(text_embed.shape[0]),
+            device=device,
+        )
+        return self.token_refiner(
+            text_embed,
+            cu_seqlens=refiner_cu_seqlens.to(device),
+            max_seqlen=refiner_max_seqlen,
+            attn_mask=refiner_attn_mask,
+        )
+
+    def _prepare_static_conditioning(
+        self,
+        *,
+        prompt_embeds: torch.Tensor,
+        img_position_ids: torch.Tensor,
+        refiner_cu_seqlens: torch.Tensor,
+        refiner_max_seqlen: int,
+        device: torch.device,
+    ) -> MiniMaxH3StaticConditioning:
+        """Prepare prompt refinement and RoPE once for a denoise request."""
+        return MiniMaxH3StaticConditioning(
+            refined_prompt_embeds=self._refine_prompt_embeddings(
+                prompt_embeds=prompt_embeds,
+                refiner_cu_seqlens=refiner_cu_seqlens,
+                refiner_max_seqlen=refiner_max_seqlen,
+                device=device,
+            ),
+            rope_freqs=self.rope(img_position_ids.to(device)).to(device),
+        )
+
+    def prepare_static_conditioning(
+        self,
+        *,
+        prompt_embeds: torch.Tensor,
+        img_position_ids: torch.Tensor,
+        refiner_cu_seqlens: torch.Tensor,
+        refiner_max_seqlen: int,
+    ) -> MiniMaxH3StaticConditioning:
+        """Prepare request conditioning through the model's forward hooks."""
+        result = self(
+            **{
+                _MINIMAX_H3_PREPARE_STATIC_CONDITIONING_KWARG: True,
+                "prompt_embeds": prompt_embeds,
+                "img_position_ids": img_position_ids,
+                "refiner_packed_seq_params": {
+                    "cu_seqlens_q": refiner_cu_seqlens,
+                    "max_seqlen_q": refiner_max_seqlen,
+                },
+            }
+        )
+        if not isinstance(result, MiniMaxH3StaticConditioning):
+            raise RuntimeError(f"unexpected static conditioning result: {type(result)!r}")
+        return result
+
+    def _resolve_static_conditioning(
+        self,
+        *,
+        static_conditioning: MiniMaxH3StaticConditioning | None,
+        prompt_embeds: torch.Tensor | None,
+        img_position_ids: torch.Tensor | None,
+        refiner_packed_seq_params: object | None,
+        device: torch.device,
+    ) -> MiniMaxH3StaticConditioning:
+        if static_conditioning is not None:
+            if not isinstance(static_conditioning, MiniMaxH3StaticConditioning):
+                raise TypeError(
+                    "static_conditioning must be a MiniMaxH3StaticConditioning, "
+                    f"got {type(static_conditioning)!r}"
+                )
+            return static_conditioning
+
+        if prompt_embeds is None or img_position_ids is None or refiner_packed_seq_params is None:
+            raise ValueError(
+                "MiniMaxH3DiTModel.forward requires static_conditioning or "
+                "prompt_embeds, img_position_ids, and refiner_packed_seq_params"
+            )
+        refiner_cu = self._psp_field(
+            refiner_packed_seq_params,
+            "refiner_packed_seq_params",
+            "cu_seqlens_q",
+        ).to(torch.int32)
+        refiner_max = int(
+            self._psp_field(
+                refiner_packed_seq_params,
+                "refiner_packed_seq_params",
+                "max_seqlen_q",
+            )
+        )
+        return self._prepare_static_conditioning(
+            prompt_embeds=prompt_embeds,
+            img_position_ids=img_position_ids,
+            refiner_cu_seqlens=refiner_cu,
+            refiner_max_seqlen=refiner_max,
+            device=device,
+        )
+
     def _embed(
         self,
         *,
         x: torch.Tensor,
         audio_x: torch.Tensor,
-        text_embeddings_selected: torch.Tensor,
+        refined_prompt_embeds: torch.Tensor,
         unique_timesteps: torch.Tensor,
         img_pos: torch.Tensor,
         audio_pos: torch.Tensor,
         text_pos: torch.Tensor,
-        refiner_cu_seqlens: torch.Tensor,
-        refiner_max_seqlen: int,
         seq_len: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1008,23 +1246,28 @@ class MiniMaxH3DiTModel(nn.Module):
         audio_rows = audio_x.view(-1, audio_x.shape[-1]).index_select(0, audio_pos).to(_FP32_DTYPE)
         audio_embed, _ = self.audio_patch_proj(audio_rows)
 
-        text_rows = text_embeddings_selected.to(device=device, dtype=_BF16_DTYPE)
-        text_embed, _ = self.condition_proj(text_rows)
-        text_embed = self.token_refiner(
-            text_embed,
-            cu_seqlens=refiner_cu_seqlens,
-            max_seqlen=refiner_max_seqlen,
-        )
+        text_embed = refined_prompt_embeds.to(device=device, dtype=_BF16_DTYPE)
 
         embeddings = torch.zeros((seq_len, self.hidden_size), device=device, dtype=_BF16_DTYPE)
-        embeddings.index_add_(0, text_pos, text_embed.to(_BF16_DTYPE)[: text_pos.shape[0]])
-        embeddings.index_add_(0, img_pos, video_embed.to(_BF16_DTYPE)[: img_pos.shape[0]])
-        embeddings.index_add_(0, audio_pos, audio_embed.to(_BF16_DTYPE)[: audio_pos.shape[0]])
+        # Every used packed row belongs to exactly one modality, so direct
+        # assignment avoids the atomic addition required by index_add_.
+        embeddings.index_copy_(0, text_pos, text_embed.to(_BF16_DTYPE)[: text_pos.shape[0]])
+        embeddings.index_copy_(0, img_pos, video_embed.to(_BF16_DTYPE)[: img_pos.shape[0]])
+        embeddings.index_copy_(0, audio_pos, audio_embed.to(_BF16_DTYPE)[: audio_pos.shape[0]])
 
-        t_emb = self.time_embedder(unique_timesteps)
+        if self.arch.adaln_curve_grid is None:
+            t_emb = self.time_embedder(unique_timesteps)
+        else:
+            t_emb = _interpolate_h3_adaln_curve(
+                self.adaln_t_table,
+                unique_timesteps,
+            )
         return embeddings, t_emb
 
-    def forward(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor] | MiniMaxH3StaticConditioning:
         """Packed inference forward.
 
         Keyword names follow the checkpoint's serving contract.
@@ -1041,16 +1284,26 @@ class MiniMaxH3DiTModel(nn.Module):
                 f"{sorted(_FORWARD_SUPPORTED_KWARGS)}"
             )
 
+        if kwargs.get(_MINIMAX_H3_PREPARE_STATIC_CONDITIONING_KWARG, False):
+            prompt_embeds = _required_kwarg(kwargs, "prompt_embeds")
+            return self._resolve_static_conditioning(
+                static_conditioning=None,
+                prompt_embeds=prompt_embeds,
+                img_position_ids=_required_kwarg(kwargs, "img_position_ids"),
+                refiner_packed_seq_params=_required_kwarg(
+                    kwargs,
+                    "refiner_packed_seq_params",
+                ),
+                device=prompt_embeds.device,
+            )
+
         x = _required_kwarg(kwargs, "x")
         audio_x = _required_kwarg(kwargs, "audio_x")
-        img_position_ids = _required_kwarg(kwargs, "img_position_ids")
         unique_timesteps = _required_kwarg(kwargs, "unique_timesteps")
         inverse_indices = _required_kwarg(kwargs, "inverse_indices").view(-1).to(torch.long)
         update_mask = _required_kwarg(kwargs, "update_mask")
         token_tags = _required_kwarg(kwargs, "token_tags").view(-1).to(torch.long)
         skip_mask_out_condition = bool(kwargs.get("skip_mask_out_condition", False))
-
-        text_selected = _required_kwarg(kwargs, "prompt_embeds")
 
         img_pos = self._pos_ids(_required_kwarg(kwargs, "img_pos_info"), "img_pos_info")
         audio_pos = self._pos_ids(_required_kwarg(kwargs, "audio_pos_info"), "audio_pos_info")
@@ -1066,9 +1319,6 @@ class MiniMaxH3DiTModel(nn.Module):
         psp = _required_kwarg(kwargs, "packed_seq_params")
         cu_seqlens = self._psp_field(psp, "packed_seq_params", "cu_seqlens_q").to(torch.int32)
         max_seqlen = int(self._psp_field(psp, "packed_seq_params", "max_seqlen_q"))
-        refiner_psp = _required_kwarg(kwargs, "refiner_packed_seq_params")
-        refiner_cu = self._psp_field(refiner_psp, "refiner_packed_seq_params", "cu_seqlens_q").to(torch.int32)
-        refiner_max = int(self._psp_field(refiner_psp, "refiner_packed_seq_params", "max_seqlen_q"))
 
         if x.dim() != 3 or x.shape[0] != 1:
             raise ValueError(f"x must be [1, S, C], got {list(x.shape)}")
@@ -1078,19 +1328,28 @@ class MiniMaxH3DiTModel(nn.Module):
         if inverse_indices.shape[0] != seq_len:
             raise ValueError(f"inverse_indices must be [{seq_len}], got {list(inverse_indices.shape)}")
         device = x.device
-        # Compute RoPE frequencies over the full packed sequence.
-        rope_freqs = self.rope(img_position_ids).to(device)
+        attn_mask = _build_packed_attention_mask(
+            used_seqlen=max_seqlen,
+            packed_seqlen=seq_len,
+            device=device,
+        )
+        static_conditioning = self._resolve_static_conditioning(
+            static_conditioning=kwargs.get(MINIMAX_H3_STATIC_CONDITIONING_KWARG),
+            prompt_embeds=kwargs.get("prompt_embeds"),
+            img_position_ids=kwargs.get("img_position_ids"),
+            refiner_packed_seq_params=kwargs.get("refiner_packed_seq_params"),
+            device=device,
+        )
+        rope_freqs = static_conditioning.rope_freqs
 
         decoder_input, t_emb = self._embed(
             x=x,
             audio_x=audio_x,
-            text_embeddings_selected=text_selected,
+            refined_prompt_embeds=static_conditioning.refined_prompt_embeds,
             unique_timesteps=unique_timesteps.view(-1).to(device),
             img_pos=img_pos.to(device),
             audio_pos=audio_pos.to(device),
             text_pos=text_pos.to(device),
-            refiner_cu_seqlens=refiner_cu.to(device),
-            refiner_max_seqlen=refiner_max,
             seq_len=seq_len,
             device=device,
         )
@@ -1116,6 +1375,7 @@ class MiniMaxH3DiTModel(nn.Module):
                 rope_freqs=block_rope,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
+                attn_mask=attn_mask,
             )
         hidden = self.sp_gather(hidden)
 
@@ -1148,7 +1408,9 @@ EntryClass = MiniMaxH3DiTModel
 __all__ = [
     "MINIMAX_H3_FP32_BUFFER_NAMES",
     "MINIMAX_H3_FP32_PARAM_NAMES",
+    "MINIMAX_H3_STATIC_CONDITIONING_KWARG",
     "MiniMaxH3DiTModel",
+    "MiniMaxH3StaticConditioning",
     "_bind_native_cuda_fp8_activation_quantizers",
     "_reorder_grouped_qkv_to_qkv",
 ]

@@ -1,0 +1,28 @@
+--- humming/utils/device.py
++++ humming/utils/device.py
+@@ -28,9 +28,25 @@
+             elif "T4" in gpu_name:
+                 bus_width = 256
+             else:
+                 raise
+-        mem_clock_mhz = pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_MEM)
++        try:
++            mem_clock_mhz = pynvml.nvmlDeviceGetMaxClockInfo(
++                handle, pynvml.NVML_CLOCK_MEM
++            )
++        except pynvml.NVMLError_NotSupported:
++            # GB10 exposes neither an NVML memory clock nor a useful NVML bus
++            # width. CUDA device properties do expose the effective LPDDR5x
++            # data rate and physical bus width, so use those values directly
++            # (without the GDDR double-data-rate multiplier below).
++            if "GB10" not in gpu_name:
++                raise
++            properties = torch.cuda.get_device_properties(gpu_index)
++            if properties.memory_clock_rate <= 0 or properties.memory_bus_width <= 0:
++                raise
++            return (
++                properties.memory_clock_rate * properties.memory_bus_width
++            ) / 8 / 1_000_000
+         return (mem_clock_mhz * 2 * bus_width) / 8 / 1000
+     finally:
+         pynvml.nvmlShutdown()

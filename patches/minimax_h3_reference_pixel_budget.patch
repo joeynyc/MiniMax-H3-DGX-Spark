@@ -1,0 +1,77 @@
+diff --git a/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py b/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+--- a/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
++++ b/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+@@ -95,6 +95,8 @@ MINIMAX_H3_OUTPUT_SHORT_EDGE = 768
+ MINIMAX_H3_OUTPUT_MAX_PIXELS = 768 * 1344
+ MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE = 2048
+ MINIMAX_H3_REFERENCE_IMAGE_MULTIPLE = 32
++MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MIN_PERCENT = 50.0
++MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MAX_PERCENT = 400.0
+ MINIMAX_H3_SUPPORTED_ASPECT_RATIOS = {
+     "21:9": 21.0 / 9.0,
+     "16:9": 16.0 / 9.0,
+@@ -385,14 +387,44 @@ def _broadcast_tensor(
+     return output
+ 
+ 
+-def _reference_image_shape(image: Image.Image) -> tuple[int, int]:
++def _reference_image_shape(
++    image: Image.Image,
++    *,
++    output_width: int | None = None,
++    output_height: int | None = None,
++    pixel_budget_percent: float | None = None,
++) -> tuple[int, int]:
+     width, height = image.size
+     ratio = width / height
+     if not 0.4 <= ratio <= 2.5:
+         raise OmniClientError(f"reference image aspect ratio must be in [0.4, 2.5], got {width}x{height}")
+     if min(width, height) < 256 or max(width, height) > 5760:
+         raise OmniClientError(f"reference image dimensions must be in [256, 5760] pixels, got {width}x{height}")
+-    scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
++    if pixel_budget_percent is None:
++        scale = MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE / min(width, height)
++    else:
++        if isinstance(pixel_budget_percent, bool):
++            raise OmniClientError("reference_image_pixel_budget_percent must be a number")
++        try:
++            percent = float(pixel_budget_percent)
++        except (TypeError, ValueError) as error:
++            raise OmniClientError("reference_image_pixel_budget_percent must be a number") from error
++        if not math.isfinite(percent) or not (
++            MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MIN_PERCENT
++            <= percent
++            <= MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MAX_PERCENT
++        ):
++            raise OmniClientError(
++                "reference_image_pixel_budget_percent must be between "
++                f"{MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MIN_PERCENT:g} and "
++                f"{MINIMAX_H3_REFERENCE_IMAGE_PIXEL_BUDGET_MAX_PERCENT:g}"
++            )
++        if output_width is None or output_height is None or output_width <= 0 or output_height <= 0:
++            raise OmniClientError(
++                "reference-image pixel budgeting requires positive output_width and output_height"
++            )
++        target_pixels = float(output_width) * float(output_height) * percent / 100.0
++        scale = math.sqrt(target_pixels / (width * height))
+     return (
+         _align_multiple(
+             width * scale,
+@@ -1480,8 +1512,16 @@ class MiniMaxH3Pipeline(
+             keyframe_frame_indices = _resolve_fl2va_keyframe_indices(extra, len(images))
+         elif task == "ref2va":
+             prepared_images = []
++            reference_image_pixel_budget_percent = extra.get(
++                "reference_image_pixel_budget_percent"
++            )
+             for item in images:
+-                ref_width, ref_height = _reference_image_shape(item)
++                ref_width, ref_height = _reference_image_shape(
++                    item,
++                    output_width=width,
++                    output_height=height,
++                    pixel_budget_percent=reference_image_pixel_budget_percent,
++                )
+                 prepared_images.append(item.resize((ref_width, ref_height), Image.Resampling.LANCZOS))
+             keyframe_frame_indices = None
+         else:

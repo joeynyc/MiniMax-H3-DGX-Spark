@@ -1,0 +1,370 @@
+diff --git a/vllm_omni/diffusion/models/minimax_h3/encoder.py b/vllm_omni/diffusion/models/minimax_h3/encoder.py
+index 438ff80a..550fffe0 100644
+--- a/vllm_omni/diffusion/models/minimax_h3/encoder.py
++++ b/vllm_omni/diffusion/models/minimax_h3/encoder.py
+@@ -10,9 +10,9 @@ memory (the retained 50-layer encoder is ~51.5 GB in BF16).
+ 
+ The computation contract is unchanged from the HF reference path:
+ 
+-- plain BF16 weights, only the first ``MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER``
+-  decoder layers are kept (the checkpoint consumes the unnormalized hidden
+-  state after decoder layer 49);
++- only the first ``MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER`` decoder layers are
++  kept (the checkpoint consumes the unnormalized hidden state after decoder
++  layer 49); projections may remain BF16 or use component-routed NF4;
+ - cuDNN SDP is enabled during encode;
+ - the multimodal backbone runs with an all-ones attention mask and
+   ``mm_token_type_ids`` derived from the image/video token ids;
+@@ -45,6 +45,84 @@ MINIMAX_H3_QWEN3VL_HIDDEN_DIM = 5120
+ logger = init_logger(__name__)
+ 
+ 
++class _MiniMaxH3NF4Weight(nn.Module):
++    """A BitsAndBytes NF4 matrix with module-aware device movement.
++
++    The H3 text encoder uses custom tensor-parallel projections instead of
++    vLLM ``LinearBase`` layers, so the generic diffusion quantization hooks do
++    not see them.  Keep the packed bytes as a parameter and move the associated
++    BitsAndBytes quantization state alongside it when the encoder is offloaded.
++    """
++
++    def __init__(self, weight: torch.Tensor, quant_state: Any) -> None:
++        super().__init__()
++        self.weight = nn.Parameter(weight, requires_grad=False)
++        self.quant_state = quant_state
++        self.output_size = int(quant_state.shape[0])
++
++    @classmethod
++    def from_bf16(
++        cls,
++        weight: torch.Tensor,
++        *,
++        compress_statistics: bool,
++    ) -> _MiniMaxH3NF4Weight:
++        import bitsandbytes.functional as bnb_functional
++
++        packed, quant_state = bnb_functional.quantize_4bit(
++            weight.detach().contiguous(),
++            quant_type="nf4",
++            compress_statistics=compress_statistics,
++        )
++        return cls(packed, quant_state)
++
++    def _apply(self, fn, recurse: bool = True):
++        super()._apply(fn, recurse=recurse)
++        self.quant_state.to(self.weight.device)
++        return self
++
++    def forward(self, input_: torch.Tensor) -> torch.Tensor:
++        import bitsandbytes as bnb
++
++        original_shape = input_.shape
++        values = input_.reshape(-1, original_shape[-1])
++        output = bnb.matmul_4bit(
++            values,
++            self.weight.t(),
++            quant_state=self.quant_state,
++        )
++        return output.reshape(*original_shape[:-1], self.output_size).to(input_.dtype)
++
++    def storage_bytes(self) -> int:
++        tensors = [self.weight, self.quant_state.absmax, self.quant_state.code]
++        if self.quant_state.nested:
++            tensors.extend(
++                [
++                    self.quant_state.offset,
++                    self.quant_state.state2.absmax,
++                    self.quant_state.state2.code,
++                ]
++            )
++        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
++
++
++def _resolve_nf4_settings(quant_config: Any | None) -> tuple[bool, bool]:
++    """Return ``(enabled, compress_statistics)`` for the H3 text encoder."""
++
++    if quant_config is None:
++        return False, True
++    method = quant_config.get_name()
++    if method != "bitsandbytes":
++        return False, True
++    quant_type = str(getattr(quant_config, "quant_type", "nf4")).lower()
++    if quant_type != "nf4":
++        raise ValueError(f"MiniMax H3 text encoder requires BitsAndBytes NF4, got {quant_type!r}")
++    ignored_layers = list(getattr(quant_config, "ignored_layers", None) or [])
++    if ignored_layers:
++        raise ValueError("MiniMax H3 text encoder NF4 does not support ignored_layers")
++    return True, bool(getattr(quant_config, "compress_statistics", True))
++
++
+ def _default_weight_loader(
+     param: nn.Parameter,
+     loaded_weight: torch.Tensor,
+@@ -135,9 +213,37 @@ class MiniMaxH3Qwen3VLMergedColumnParallelLinear(nn.Module):
+         self.weight.weight_loader = self.weight_loader  # type: ignore[attr-defined]
+         self._tp_rank = tp_rank
+         self._tp_size = tp_size
++        self.nf4_gate: _MiniMaxH3NF4Weight | None = None
++        self.nf4_up: _MiniMaxH3NF4Weight | None = None
+ 
+     def forward(self, input_: torch.Tensor) -> torch.Tensor:
+-        return F.linear(input_, self.weight)
++        gate, up = self.project_gate_up(input_)
++        return torch.cat((gate, up), dim=-1)
++
++    def project_gate_up(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++        if self.nf4_gate is not None:
++            return self.nf4_gate(input_), self.nf4_up(input_)
++        shard_size = self.intermediate_size_per_partition
++        return (
++            F.linear(input_, self.weight[:shard_size]),
++            F.linear(input_, self.weight[shard_size:]),
++        )
++
++    def quantize_nf4(self, *, compress_statistics: bool) -> tuple[int, int]:
++        if self.nf4_gate is not None:
++            return 0, 0
++        original_bytes = self.weight.numel() * self.weight.element_size()
++        shard_size = self.intermediate_size_per_partition
++        self.nf4_gate = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight[:shard_size],
++            compress_statistics=compress_statistics,
++        )
++        self.nf4_up = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight[shard_size:],
++            compress_statistics=compress_statistics,
++        )
++        del self.weight
++        return original_bytes, self.nf4_gate.storage_bytes() + self.nf4_up.storage_bytes()
+ 
+     def weight_loader(
+         self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str | None = None
+@@ -183,9 +289,48 @@ class MiniMaxH3Qwen3VLQKVParallelLinear(nn.Module):
+         self.weight.weight_loader = self.weight_loader  # type: ignore[attr-defined]
+         self._tp_rank = tp_rank
+         self._tp_size = tp_size
++        self.nf4_q: _MiniMaxH3NF4Weight | None = None
++        self.nf4_k: _MiniMaxH3NF4Weight | None = None
++        self.nf4_v: _MiniMaxH3NF4Weight | None = None
+ 
+     def forward(self, input_: torch.Tensor) -> torch.Tensor:
+-        return F.linear(input_, self.weight)
++        query, key, value = self.project_qkv(input_)
++        return torch.cat((query, key, value), dim=-1)
++
++    def project_qkv(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        if self.nf4_q is not None:
++            return self.nf4_q(input_), self.nf4_k(input_), self.nf4_v(input_)
++        q_local = self.local_num_heads * self.head_dim
++        kv_local = self.local_num_kv_heads * self.head_dim
++        return (
++            F.linear(input_, self.weight[:q_local]),
++            F.linear(input_, self.weight[q_local : q_local + kv_local]),
++            F.linear(input_, self.weight[q_local + kv_local :]),
++        )
++
++    def quantize_nf4(self, *, compress_statistics: bool) -> tuple[int, int]:
++        if self.nf4_q is not None:
++            return 0, 0
++        original_bytes = self.weight.numel() * self.weight.element_size()
++        q_local = self.local_num_heads * self.head_dim
++        kv_local = self.local_num_kv_heads * self.head_dim
++        self.nf4_q = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight[:q_local],
++            compress_statistics=compress_statistics,
++        )
++        self.nf4_k = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight[q_local : q_local + kv_local],
++            compress_statistics=compress_statistics,
++        )
++        self.nf4_v = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight[q_local + kv_local :],
++            compress_statistics=compress_statistics,
++        )
++        del self.weight
++        return (
++            original_bytes,
++            self.nf4_q.storage_bytes() + self.nf4_k.storage_bytes() + self.nf4_v.storage_bytes(),
++        )
+ 
+     def weight_loader(
+         self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str | None = None
+@@ -227,6 +372,7 @@ class MiniMaxH3Qwen3VLRowParallelLinear(nn.Module):
+         self.weight.weight_loader = self.weight_loader  # type: ignore[attr-defined]
+         self._tp_rank = tp_rank
+         self._tp_size = tp_size
++        self.nf4_weight: _MiniMaxH3NF4Weight | None = None
+ 
+     def forward(self, input_: torch.Tensor) -> torch.Tensor:
+         if self.input_is_parallel:
+@@ -234,7 +380,10 @@ class MiniMaxH3Qwen3VLRowParallelLinear(nn.Module):
+         else:
+             split_input = input_.split(self.input_size_per_partition, dim=-1)
+             input_parallel = split_input[self._tp_rank].contiguous()
+-        output_parallel = F.linear(input_parallel, self.weight)
++        if self.nf4_weight is not None:
++            output_parallel = self.nf4_weight(input_parallel)
++        else:
++            output_parallel = F.linear(input_parallel, self.weight)
+         if self._tp_size > 1:
+             # Reduce in fp32: the reference path accumulates the full (K=8192)
+             # dot product inside a single cuBLAS GEMM before rounding to bf16.
+@@ -242,9 +391,20 @@ class MiniMaxH3Qwen3VLRowParallelLinear(nn.Module):
+             # and amplify error on this model's large-magnitude activations.
+             output_parallel = output_parallel.float()
+             self.group.all_reduce(output_parallel)
+-            output_parallel = output_parallel.to(self.weight.dtype)
++            output_parallel = output_parallel.to(input_.dtype)
+         return output_parallel
+ 
++    def quantize_nf4(self, *, compress_statistics: bool) -> tuple[int, int]:
++        if self.nf4_weight is not None:
++            return 0, 0
++        original_bytes = self.weight.numel() * self.weight.element_size()
++        self.nf4_weight = _MiniMaxH3NF4Weight.from_bf16(
++            self.weight,
++            compress_statistics=compress_statistics,
++        )
++        del self.weight
++        return original_bytes, self.nf4_weight.storage_bytes()
++
+     def weight_loader(
+         self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str | None = None
+     ) -> None:
+@@ -663,16 +823,12 @@ class MiniMaxH3Qwen3VLTextAttention(nn.Module):
+     ) -> torch.Tensor:
+         input_shape = hidden_states.shape[:-1]
+         hidden_shape = (*input_shape, -1, self.head_dim)
+-        q_local = self.qkv_proj.local_num_heads * self.head_dim
+-        kv_local = self.qkv_proj.local_num_kv_heads * self.head_dim
+-        q_weight = self.qkv_proj.weight[0:q_local]
+-        k_weight = self.qkv_proj.weight[q_local : q_local + kv_local]
+-        v_weight = self.qkv_proj.weight[q_local + kv_local : q_local + 2 * kv_local]
+         # Three separate GEMMs keep the numerics identical to the reference
+         # path (packed QKV changes cuBLAS tiling and shifts bf16 rounding).
+-        query_states = self.q_norm(F.linear(hidden_states, q_weight).view(hidden_shape)).transpose(1, 2)
+-        key_states = self.k_norm(F.linear(hidden_states, k_weight).view(hidden_shape)).transpose(1, 2)
+-        value_states = F.linear(hidden_states, v_weight).view(hidden_shape).transpose(1, 2)
++        query_states, key_states, value_states = self.qkv_proj.project_qkv(hidden_states)
++        query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
++        key_states = self.k_norm(key_states.view(hidden_shape)).transpose(1, 2)
++        value_states = value_states.view(hidden_shape).transpose(1, 2)
+ 
+         cos, sin = position_embeddings
+         query_states, key_states = _apply_rotary_pos_emb(query_states, key_states, cos, sin)
+@@ -715,9 +871,7 @@ class MiniMaxH3Qwen3VLTextMLP(nn.Module):
+         )
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+-        ip_local = self.gate_up_proj.intermediate_size_per_partition
+-        gate = F.linear(x, self.gate_up_proj.weight[0:ip_local])
+-        up = F.linear(x, self.gate_up_proj.weight[ip_local : 2 * ip_local])
++        gate, up = self.gate_up_proj.project_gate_up(x)
+         x = F.silu(gate) * up
+         return self.down_proj(x)
+ 
+@@ -911,6 +1065,7 @@ class MiniMaxH3Qwen3VLEncoder(nn.Module):
+         device: torch.device,
+         load_model: bool,
+         encoder_group: Any | None = None,
++        quant_config: Any | None = None,
+     ) -> None:
+         super().__init__()
+         self.device_target = device
+@@ -938,10 +1093,22 @@ class MiniMaxH3Qwen3VLEncoder(nn.Module):
+         )
+         self.text_model.to(dtype=dtype)
+         self._load_weights(model_path)
++        nf4_enabled, compress_statistics = _resolve_nf4_settings(quant_config)
++        if nf4_enabled:
++            original_bytes, quantized_bytes = self._quantize_text_model_nf4(
++                compress_statistics=compress_statistics,
++            )
++            logger.info(
++                "MiniMax H3 Qwen3-VL text projections quantized to NF4: %.2f GiB -> %.2f GiB",
++                original_bytes / (1024**3),
++                quantized_bytes / (1024**3),
++            )
+         logger.info(
+-            "MiniMax H3 Qwen3-VL encoder: %d retained decoder layers, text_encoder_tp_size=%d, vision replicated",
++            "MiniMax H3 Qwen3-VL encoder: %d retained decoder layers, "
++            "text_encoder_tp_size=%d, vision replicated, projection_dtype=%s",
+             MINIMAX_H3_QWEN3VL_SELECTED_LM_LAYER,
+             self._tp_size,
++            "nf4" if nf4_enabled else "bf16",
+         )
+ 
+     @property
+@@ -1026,6 +1193,23 @@ class MiniMaxH3Qwen3VLEncoder(nn.Module):
+                 missing[:5],
+             )
+ 
++    def _quantize_text_model_nf4(self, *, compress_statistics: bool) -> tuple[int, int]:
++        original_bytes = 0
++        quantized_bytes = 0
++        projection_types = (
++            MiniMaxH3Qwen3VLMergedColumnParallelLinear,
++            MiniMaxH3Qwen3VLQKVParallelLinear,
++            MiniMaxH3Qwen3VLRowParallelLinear,
++        )
++        for module in self.text_model.modules():
++            if isinstance(module, projection_types):
++                before, after = module.quantize_nf4(
++                    compress_statistics=compress_statistics,
++                )
++                original_bytes += before
++                quantized_bytes += after
++        return original_bytes, quantized_bytes
++
+     def load_to_device(self) -> None:
+         if not self.is_loaded:
+             return
+diff --git a/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py b/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+index 89157ae1..691c0b85 100644
+--- a/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
++++ b/vllm_omni/diffusion/models/minimax_h3/pipeline_minimax_h3.py
+@@ -106,6 +106,12 @@ MINIMAX_H3_REFERENCE_IMAGE_FORMATS = frozenset({"jpeg", "png", "webp", "heic",
+ MINIMAX_H3_MIN_OUTPUT_SECONDS = 4.0
+ MINIMAX_H3_MAX_OUTPUT_SECONDS = 15.0
+ 
++def _resolve_component_quant_config(quant_config, component: str):
++    if hasattr(quant_config, "resolve"):
++        return quant_config.resolve(component)
++    return quant_config
++
++
+ def _minimax_h3_post_process(output, output_type: str = "np"):
+     """Convert the joint video/audio output without capturing worker state.
+ 
+@@ -493,9 +499,13 @@ class MiniMaxH3Pipeline(
+                 fall_back_to_pt=False,
+             )
+         ]
++        transformer_quant_config = _resolve_component_quant_config(
++            od_config.quantization_config,
++            "transformer",
++        )
+         self.transformer = MiniMaxH3DiTModel(
+             od_config,
+-            quant_config=od_config.quantization_config,
++            quant_config=transformer_quant_config,
+         )
+ 
+         self.tokenizer = Qwen2TokenizerFast.from_pretrained(
+@@ -536,11 +536,16 @@ class MiniMaxH3Pipeline(
+             )
+         self.text_encoder_tp_size = text_encoder_tp_size
+         self.text_encoder_group = self._build_text_encoder_group(text_encoder_tp_size)
++        text_encoder_quant_config = _resolve_component_quant_config(
++            od_config.quantization_config,
++            "text_encoder",
++        )
+         self.text_encoder = MiniMaxH3Qwen3VLEncoder(
+             os.path.join(model_path, "text_encoder"),
+             device=self.device,
+             load_model=rank < text_encoder_tp_size,
+             encoder_group=self.text_encoder_group,
++            quant_config=text_encoder_quant_config,
+         )
+         self.video_vae = MiniMaxH3VideoVAE(
+             os.path.join(model_path, "video_vae"),

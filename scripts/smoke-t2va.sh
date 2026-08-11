@@ -32,6 +32,7 @@ SEED="${SEED:-42}"
 FPS="${FPS:-24}"
 DURATION="${DURATION:-2.0}"
 AUDIO_FLOW_SHIFT="${AUDIO_FLOW_SHIFT:-3.0}"
+ASPECT_RATIO="${ASPECT_RATIO:-16:9}"
 
 mkdir -p "$(dirname "$OUT")" "$(dirname "$LOG")"
 rm -f "$PART"
@@ -45,6 +46,7 @@ HTTP_CODE="$(curl -sS "${AUTH_ARGS[@]}" -X POST "$BASE_URL/v1/videos/sync" \
   -F "flow_shift=$FLOW_SHIFT" \
   -F "seed=$SEED" \
   -F "fps=$FPS" \
+  -F "aspect_ratio=$ASPECT_RATIO" \
   -F "extra_params={\"task\":\"t2va\",\"duration\":$DURATION,\"audio_flow_shift\":$AUDIO_FLOW_SHIFT}" \
   --output "$PART" \
   -w '%{http_code}')"

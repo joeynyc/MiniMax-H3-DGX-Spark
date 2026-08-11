@@ -34,6 +34,11 @@ checkpoint itself is mounted read-only, the container is not privileged, and
 the base image is pinned by digest, but this is not a sandbox for untrusted
 model repositories.
 
+Humming, Triton, and TorchInductor also write compiled code to the persistent
+`h3-kernel-cache` Compose volume. Treat that volume as executable runtime state:
+do not import it from an untrusted host, and clear only that verified volume
+after changing the pinned image, CUDA compiler, or kernel toolchain.
+
 Treat prompts and generated output as sensitive. The project deliberately
 keeps `.env`, model weights, caches, logs, and generated media out of Git.
 

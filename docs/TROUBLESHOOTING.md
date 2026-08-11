@@ -11,8 +11,15 @@ minutes; a live container loading checkpoint shards is not a crash.
 | Triton reports `get_fp8e4nv` or FP8 scalar lowering failure | The native-CUDA quantizer binding is missing or a different image is in use | Confirm the pinned image and patched module; eager mode is a diagnostic fallback |
 | FP8 quantization kernel rejects `Float8_e4m3fn` input | AdaLN activation was cast to FP8 before the linear | Confirm the BF16 AdaLN patch and test pass |
 | CuTe/FA4 variable-length compile error | FlashAttention-4 selected for the packed H3 diffusion shape | Use verified `CUDNN_ATTN` or baseline `TORCH_SDPA`; do not select FA4 |
+| cuDNN reports `No available kernel` | The requested shape is outside cuDNN FMHA support | The backend falls back per call; set `H3_DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` to use the conservative dispatcher globally |
+| Humming reports NVML clock information is unsupported or computes zero bandwidth | GB10 does not expose the fields used by the generic tuner | Rebuild the included image so the guarded GB10 CUDA-properties fallback is present |
+| Humming reports `stride(-1) must be 1` while viewing FP8 as integers | The online-FP8 transposed weight view reached Humming without normalization | Confirm `humming_online_fp8_layout.patch` applied and its tests pass |
+| The same seed produces different frames with Humming | Humming Stream-K is active for the large QKV reduction | Keep `VLLM_HUMMING_BATCH_INVARIANT=1`; do not substitute the global `VLLM_BATCH_INVARIANT` setting |
+| Launcher rejects Humming with compile or Cache-DiT | Humming was selected outside its validated profile | Use `H3_EXECUTION_MODE=eager` and `H3_CACHE_BACKEND=none`, or restore `H3_LINEAR_BACKEND=CUTLASS` |
+| Container remains `health: starting` during cold boot | Readiness is waiting for checkpoint loading and the production-shape warmup | Follow `make logs`; wait for `dummy model warmup completed` and `Application startup complete` |
+| Startup reports `fl2va does not accept an audio condition` | The generic multimodal dummy request is still installed | Rebuild the current image and confirm `minimax_h3_production_warmup.patch` applies |
 | HTTP succeeds but output is JSON or tiny | API returned an error body saved under a media filename | Use the included smoke script, which stages and probes the response |
-| `/health` works but generation fails | Health does not exercise the diffusion pipeline | Inspect the response error JSON and worker logs; run a real acceptance request |
+| `/health` works but generation fails | The two-step warmup does not cover the complete 20-step request | Inspect the response error JSON and worker logs; run `make acceptance` |
 | First compiled request is slower than later requests | Regional compilation happens on first use | Treat it as warm-up; compare multiple later runs |
 | Quality request returns HTTP 504 at a round timeout | `H3_VIDEO_SYNC_TIMEOUT` is shorter than the one-Spark workload | Keep the verified 7,200-second setting or deliberately raise it within the preflight limit |
 | Cache-DiT output differs from no-cache output | Cache-DiT intentionally reuses approximate intermediate state | Compare the same seed with `scripts/compare-quality.sh`; disable cache for full compute |
@@ -31,3 +38,12 @@ Do not declare success from GPU allocation, shard loading, or health alone.
 For performance work, also require zero OOM kills/restarts, multiple warmed
 runs, continuous memory/swap sampling, and the comparison rules in
 [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+
+Health proves a two-step production-shape generation, while `make acceptance`
+remains the full 20-step decoded audio-video and fixed-seed gate.
+
+If a pinned image, CUDA compiler, Humming, Triton, or Torch version changes,
+stop the service and remove only the dedicated `h3-kernel-cache` Compose volume
+after verifying its exact name with `docker volume inspect`. The cache is
+rebuildable, but removal discards the compiled kernels and makes the next
+startup cold. Do not remove checkpoint or Hugging Face cache volumes.

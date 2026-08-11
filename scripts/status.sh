@@ -17,7 +17,7 @@ if [[ -n "${H3_API_KEY:-}" ]]; then
 fi
 
 printf '%s\n' '== container =='
-docker ps -a --filter name=minimax-h3-fl2va \
+docker ps -a --filter name=minimax-h3-rig \
   --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 
 printf '\n%s\n' '== memory =='

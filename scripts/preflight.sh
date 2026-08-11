@@ -12,10 +12,23 @@ fail() {
 }
 
 [[ -f "$ENV_FILE" ]] || fail "copy .env.example to .env and review it first"
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+h3_source_env_defaults "$ENV_FILE" \
+  MINIMAX_H3_LICENSE_ACKNOWLEDGED \
+  ALLOW_UNSUPPORTED_ARCH \
+  MINIMAX_H3_MODEL_ROOT \
+  MINIMAX_H3_LORA_ROOT \
+  HF_CACHE_DIR \
+  H3_RIG_MODE \
+  H3_FL2VA_PARTITION \
+  H3_BIND_HOST \
+  H3_ALLOW_REMOTE_API \
+  H3_API_KEY \
+  H3_API_PORT \
+  H3_VIDEO_SYNC_TIMEOUT \
+  H3_DIFFUSION_ATTENTION_BACKEND \
+  H3_EXECUTION_MODE \
+  H3_CACHE_BACKEND \
+  H3_CACHE_CONFIG
 
 [[ "${MINIMAX_H3_LICENSE_ACKNOWLEDGED:-false}" == "true" ]] ||
   fail "read MODEL-LICENSE.md and set MINIMAX_H3_LICENSE_ACKNOWLEDGED=true only if authorized"
@@ -32,11 +45,55 @@ fi
 GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
 [[ -n "$GPU_NAME" ]] || fail "no NVIDIA GPU was detected"
 
-MODEL_DIR="${MINIMAX_H3_MODEL_DIR:-}"
-[[ -n "$MODEL_DIR" ]] || fail "MINIMAX_H3_MODEL_DIR is unset"
-[[ "$MODEL_DIR" = /* ]] || fail "MINIMAX_H3_MODEL_DIR must be an absolute path"
+MODEL_ROOT="${MINIMAX_H3_MODEL_ROOT:-}"
+[[ -n "$MODEL_ROOT" ]] || fail "MINIMAX_H3_MODEL_ROOT is unset"
+[[ "$MODEL_ROOT" = /* ]] || fail "MINIMAX_H3_MODEL_ROOT must be an absolute path"
+RIG_MODE="${H3_RIG_MODE:-fl2va}"
+case "$RIG_MODE" in
+  fl2va)
+    PARTITION="${H3_FL2VA_PARTITION:-FL2VA-TutuCurve-Step100/model}"
+    case "$PARTITION" in
+      FL2VA|FL2VA-TutuCurve-Step100/model) ;;
+      *) fail "H3_FL2VA_PARTITION must be FL2VA or FL2VA-TutuCurve-Step100/model" ;;
+    esac
+    ;;
+  ref2va) PARTITION="Ref2VA" ;;
+  *) fail "H3_RIG_MODE must be fl2va or ref2va" ;;
+esac
+MODEL_DIR="$MODEL_ROOT/$PARTITION"
 [[ -f "$MODEL_DIR/model_index.json" ]] || fail "model_index.json is missing from $MODEL_DIR"
 [[ -d "$MODEL_DIR/transformer" ]] || fail "transformer directory is missing from $MODEL_DIR"
+TRANSFORMER_INDEX="$MODEL_DIR/transformer/model.safetensors.index.json"
+TRANSFORMER_CONFIG="$MODEL_DIR/transformer/config.json"
+[[ -f "$TRANSFORMER_INDEX" ]] || fail "transformer weight index is missing from $MODEL_DIR/transformer"
+[[ -f "$TRANSFORMER_CONFIG" ]] || fail "transformer config is missing from $MODEL_DIR/transformer"
+python3 - "$TRANSFORMER_INDEX" "$TRANSFORMER_CONFIG" "$MODEL_DIR/transformer" <<'PY' ||
+import json
+import sys
+from pathlib import Path
+
+index_path = Path(sys.argv[1])
+config_path = Path(sys.argv[2])
+weights_dir = Path(sys.argv[3])
+weight_map = json.loads(index_path.read_text()).get("weight_map") or {}
+files = sorted(set(weight_map.values()))
+missing = [name for name in files if not (weights_dir / name).is_file()]
+if not files or missing:
+    detail = ", ".join(missing[:5]) if missing else "weight_map is empty"
+    raise SystemExit(f"incomplete transformer checkpoint: {detail}")
+config = json.loads(config_path.read_text())
+grid = config.get("adaln_curve_grid")
+dimensions = config.get("time_embed_dim")
+if not isinstance(grid, int) or isinstance(grid, bool) or grid < 2:
+    raise SystemExit("canonical partition is not AdaLN curve-compressed")
+if not isinstance(dimensions, int) or isinstance(dimensions, bool) or dimensions < 1:
+    raise SystemExit("curve-compressed partition has an invalid time_embed_dim")
+PY
+  fail "production transformer checkpoint is incomplete or not curve-compressed in $MODEL_DIR/transformer"
+
+LORA_ROOT="${MINIMAX_H3_LORA_ROOT:-}"
+[[ -n "$LORA_ROOT" && "$LORA_ROOT" = /* ]] || fail "MINIMAX_H3_LORA_ROOT must be an absolute path"
+[[ -d "$LORA_ROOT" ]] || fail "MINIMAX_H3_LORA_ROOT does not exist: $LORA_ROOT"
 
 CACHE_DIR="${HF_CACHE_DIR:-}"
 [[ -n "$CACHE_DIR" && "$CACHE_DIR" = /* ]] || fail "HF_CACHE_DIR must be an absolute path"
@@ -91,7 +148,7 @@ if [[ "$CACHE_BACKEND" == cache_dit && -z "$CACHE_CONFIG" ]]; then
   fail "H3_CACHE_BACKEND=cache_dit requires an explicit tested H3_CACHE_CONFIG"
 fi
 
-RUNNING="$(docker inspect minimax-h3-fl2va --format '{{.State.Running}}' 2>/dev/null || true)"
+RUNNING="$(docker inspect minimax-h3-rig --format '{{.State.Running}}' 2>/dev/null || true)"
 if [[ "$RUNNING" != "true" ]]; then
   AVAILABLE_KIB="$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)"
   REQUIRED_KIB=$((105 * 1024 * 1024))
@@ -106,6 +163,7 @@ printf 'preflight passed\n'
 printf '  architecture: %s\n' "$ARCH"
 printf '  GPU: %s\n' "$GPU_NAME"
 printf '  model: %s\n' "$MODEL_DIR"
+printf '  rig mode: %s\n' "$RIG_MODE"
 printf '  API bind: %s\n' "$BIND_HOST"
 printf '  API port: %s\n' "$PORT"
 printf '  synchronous request timeout: %s seconds\n' "$VIDEO_SYNC_TIMEOUT"
