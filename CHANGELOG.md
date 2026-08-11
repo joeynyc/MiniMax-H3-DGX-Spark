@@ -18,6 +18,9 @@
 - Autocast checkpoint-owned image and video preprocessing at the FP16 video-VAE
   boundary, preventing Ref2VA's internal FP32 tensors from reaching half-weight
   Conv3D layers while preserving FP32 latent normalization afterward.
+- Matched preflight configuration precedence to Docker Compose so an explicit
+  operator environment override selects the same rig and model that starts,
+  while `.env` continues to provide defaults for unset values.
 - Made curve-compressed FL2VA/Ref2VA a fail-closed production requirement;
   full checkpoints are offline conversion and comparison sources, not runtime
   profiles.

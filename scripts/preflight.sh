@@ -12,10 +12,23 @@ fail() {
 }
 
 [[ -f "$ENV_FILE" ]] || fail "copy .env.example to .env and review it first"
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+h3_source_env_defaults "$ENV_FILE" \
+  MINIMAX_H3_LICENSE_ACKNOWLEDGED \
+  ALLOW_UNSUPPORTED_ARCH \
+  MINIMAX_H3_MODEL_ROOT \
+  MINIMAX_H3_LORA_ROOT \
+  HF_CACHE_DIR \
+  H3_RIG_MODE \
+  H3_FL2VA_PARTITION \
+  H3_BIND_HOST \
+  H3_ALLOW_REMOTE_API \
+  H3_API_KEY \
+  H3_API_PORT \
+  H3_VIDEO_SYNC_TIMEOUT \
+  H3_DIFFUSION_ATTENTION_BACKEND \
+  H3_EXECUTION_MODE \
+  H3_CACHE_BACKEND \
+  H3_CACHE_CONFIG
 
 [[ "${MINIMAX_H3_LICENSE_ACKNOWLEDGED:-false}" == "true" ]] ||
   fail "read MODEL-LICENSE.md and set MINIMAX_H3_LICENSE_ACKNOWLEDGED=true only if authorized"

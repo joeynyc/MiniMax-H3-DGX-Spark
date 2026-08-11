@@ -1,5 +1,32 @@
 #!/usr/bin/env bash
 
+h3_source_env_defaults() {
+  local env_file="$1"
+  shift
+  local key
+  local allexport_was_set=false
+  local -A explicit_values=()
+
+  for key in "$@"; do
+    if [[ -v "$key" ]]; then
+      explicit_values["$key"]="${!key}"
+    fi
+  done
+
+  [[ $- == *a* ]] && allexport_was_set=true
+  set -a
+  # shellcheck disable=SC1090
+  if ! source "$env_file"; then
+    [[ "$allexport_was_set" == true ]] || set +a
+    return 1
+  fi
+  [[ "$allexport_was_set" == true ]] || set +a
+
+  for key in "${!explicit_values[@]}"; do
+    export "$key=${explicit_values[$key]}"
+  done
+}
+
 h3_validate_network_security() {
   local bind_host="$1"
   local allow_remote="$2"

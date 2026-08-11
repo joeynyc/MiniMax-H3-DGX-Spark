@@ -32,6 +32,7 @@ provenance:
 
 profile-test:
 	./tests/test-profile-validation.sh
+	./tests/test-env-defaults.sh
 
 security-test:
 	./tests/test-network-security.sh
