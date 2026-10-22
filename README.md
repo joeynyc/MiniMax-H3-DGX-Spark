@@ -23,6 +23,8 @@ inspectable, and repeatable.
 > running, or displaying model output. This repository contains no model
 > weights and no generated media.
 
+**Follow [@aijoey](https://x.com/aijoey) on X** for DGX Spark benchmarks, configs and new recipes.
+
 ## Verified configuration
 
 | Item | Measured result |
